@@ -104,10 +104,21 @@ class DamageTests(unittest.TestCase):
         self.assertIn("already Shaken", out.breach_reasons[0])
 
     def test_reduced_to_zero_breaches(self):
-        out = resolve_shield_damage(5, 20, 10, 0)
+        out = resolve_shield_damage(4, 20, 10, 0)      # already below 25% -> breach only
         self.assertEqual(out.shields_after, 0)
         self.assertEqual(out.breach_reasons, ["Shields reduced to 0"])
         self.assertEqual(out.shaken_reasons, [])
+
+    def test_reduced_to_zero_from_below_half_is_shaken_plus_breach(self):
+        out = resolve_shield_damage(8, 20, 10, 0)      # 40% -> 0: crosses 25%
+        self.assertEqual(out.shaken_reasons, ["Shields dropped below 25%"])
+        self.assertEqual(out.breach_reasons, ["Shields reduced to 0"])
+
+    def test_full_to_zero_is_shaken_and_one_breach(self):
+        out = resolve_shield_damage(21, 21, 30, 6)     # 21 -> 0 in one hit
+        self.assertEqual(out.shaken_reasons, ["Shields dropped below 50%"])
+        self.assertEqual(len(out.breach_reasons), 1)
+        self.assertIn("reduced to 0", out.breach_reasons[0])
 
     def test_hit_at_zero_breaches(self):
         out = resolve_shield_damage(0, 20, 4, 1)

@@ -1029,8 +1029,9 @@ def resolve_shield_damage(shields: int, shields_max: int, raw_damage: int, resis
 
     * Resistance is deducted unless the attack is Piercing.
     * Hit while Shields are 0, or Shields reduced to 0 -> Breach.
-    * Shields dropping below 50% or below 25% -> Shaken.
+    * Shields dropping below 50% or below 25% -> Shaken (also when the hit reaches 0).
     * Dropping below 25% after already becoming Shaken in the SAME attack -> Breach instead.
+    * A single hit causes at most one Breach from these triggers (High Yield adds more).
     """
     applied = 0 if piercing else max(0, resistance)
     final = max(0, raw_damage - applied)
@@ -1042,9 +1043,6 @@ def resolve_shield_damage(shields: int, shields_max: int, raw_damage: int, resis
     if before <= 0:
         out.breach_reasons.append("hit while Shields at 0")
         return out
-    if after == 0:
-        out.breach_reasons.append("Shields reduced to 0")
-        return out
     half, quarter = shields_max * 0.5, shields_max * 0.25
     crossed_half = before >= half > after
     crossed_quarter = before >= quarter > after
@@ -1055,6 +1053,11 @@ def resolve_shield_damage(shields: int, shields_max: int, raw_damage: int, resis
             out.breach_reasons.append("Shields below 25% while already Shaken by this attack")
         else:
             out.shaken_reasons.append("Shields dropped below 25%")
+    if after == 0:
+        reason = "Shields reduced to 0"
+        if out.breach_reasons:
+            reason += " (after being Shaken by this attack)"
+        out.breach_reasons = [reason]
     return out
 
 
@@ -2732,8 +2735,8 @@ class CombatHelperApp:
         self.turns_bar.configure(maximum=max(1, s.scale), value=min(s.turns_used, s.scale))
         info = "Systems used this round: " + (", ".join(s.systems_used) if s.systems_used
                                               else "none")
-        if s.side == "NPC":
-            info += "\nNPC rule: re-using a system in the same round costs 1 Threat."
+        info += ("\nRe-using a system in the same round costs 1 Threat "
+                 + ("(the NPC spends it)." if s.side == "NPC" else "(added to the pool)."))
         if s.brace_for_impact:
             info += "\nBRACE FOR IMPACT: no Major Action on the next turn."
         self.turns_info_lbl.configure(text=info)
@@ -2866,9 +2869,9 @@ class CombatHelperApp:
                 if ship.turns_used >= ship.scale:
                     alerts.append(f"Turn budget used up: {ship.turns_used}/{ship.scale} "
                                   f"(Scale {ship.scale}).")
-                if ship.side == "NPC" and adef["system"] in ship.systems_used:
-                    alerts.append(f"{adef['system']} already used this round - costs 1 Threat "
-                                  "to re-use.")
+                if adef["system"] in ship.systems_used:
+                    alerts.append(f"{adef['system']} already used this round - re-using it "
+                                  "costs 1 Threat (NPC spends, player ship adds).")
                 if ship.brace_for_impact:
                     alerts.append("Brace for Impact: this ship cannot take a Major Action now.")
             if adef["requires_power"] and not ship.reserve_power:
@@ -2911,7 +2914,9 @@ class CombatHelperApp:
                 alerts.append(f"Experimental Vessel: ship assist dice complicate on "
                               f"{ship.assist_complication_from}-20.")
             if name == "Damage Control" and ship.has_talent("Rugged Design"):
-                L.append(("Rugged Design: Damage Control -1 Difficulty (included).", "good"))
+                L.append(("Rugged Design: re-roll 1d20 on this repair (auto-roll re-rolls a "
+                          "failed die); on success you may spend 2 Momentum to patch a second "
+                          "breach.", "good"))
             if ship.cloaked:
                 if name in HOSTILE_ACTIONS:
                     alerts.append(f"{ship.name} is CLOAKED: it must decloak (Minor Action) "
@@ -3313,11 +3318,12 @@ class CombatHelperApp:
                 self.log(f"WARNING: {ship.name} exceeds its Scale turn limit (GM override).",
                          "alert")
             sysname = adef["system"]
-            if ship.side == "NPC" and sysname in ship.systems_used:
+            if sysname in ship.systems_used:
+                threat_verb = "spend" if ship.side == "NPC" else "add"
                 ans = self.ask_yes_no_cancel(
                     "System already used",
                     f"{ship.name} already used its {sysname} system this round.\n\n"
-                    "Yes = spend 1 Threat to use it again\n"
+                    f"Yes = {threat_verb} 1 Threat to use it again\n"
                     "No = proceed WITHOUT spending Threat (GM override)\n"
                     "Cancel = abort the action")
                 if ans is None:
@@ -3390,14 +3396,16 @@ class CombatHelperApp:
                 items.append(f"{dice - 2} bonus d20")
         if reuse_threat:
             items.append("system re-use")
+            if ship.side == "Player":
+                add_threat += reuse_threat
         if ship.side == "NPC":
             return self.pay_for_side(ship, spend + reuse_threat, " + ".join(items)) \
                 if spend + reuse_threat else True
         if spend and not self.pay_for_side(ship, spend, " + ".join(items)):
             return False
         if add_threat:
-            self.add_threat(add_threat, f"{ship.name} fires "
-                                        f"{'a torpedo salvo' if add_threat > 1 else 'a torpedo'}")
+            reasons = [i for i in items if i in ("torpedo", "torpedo salvo", "system re-use")]
+            self.add_threat(add_threat, f"{ship.name}: {' + '.join(reasons)}")
         return True
 
     def _roll_defense(self, target, mode):

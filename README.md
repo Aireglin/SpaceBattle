@@ -92,8 +92,9 @@ It also lists every quality of the weapon in use.
 ## Other rules automation
 
 * **Turn budget:** each Major Action uses one of the ship's turns. You get a warning
-  when a ship goes past its Scale. If an NPC ship uses the same system twice in a
-  round, you're asked to spend 1 Threat (or to override, or to cancel).
+  when a ship goes past its Scale. If a ship uses the same system twice in a round,
+  you're asked to pay 1 Threat, or to override, or to cancel. An NPC ship spends the
+  Threat; a player ship adds it to the pool.
 * **End Round:** advances the Round counter by 1. It applies Persistent damage and
   resets turn counters and the per-round effects: Modulate Shields +2 Resistance,
   Evasive Action, Defensive Fire, Attack Pattern, Jammed, Slowed, Shaken, and a
@@ -132,8 +133,10 @@ It also lists every quality of the weapon in use.
   you can pick a result from the Minor Damage table or click **Auto-Roll d20**; a
   19–20 re-rolls automatically. A breach is triggered when Shields hit 0, when a ship
   is hit at 0 Shields, or when Shields drop below 25% after the ship was already
-  Shaken by the same attack. Each breach rolls on the System Hit table, or you pick
-  the system when Targeting Solution allows it.
+  Shaken by the same attack. A hit that takes Shields to 0 also makes the ship Shaken
+  for each threshold it crosses. One hit causes at most one breach from these
+  triggers, and High Yield adds one more. Each breach rolls on the System Hit table,
+  or you pick the system when Targeting Solution allows it.
 * **System Hit table:** the default is the d12 table you specified (1–2 Comms …
   11–12 Weapons). A weighted d20 table (1 Comms, 2 Computers, 3–6 Engines, 7–9
   Sensors, 10–17 Structure, 18–20 Weapons) can be selected in the System Hit
