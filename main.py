@@ -35,7 +35,7 @@ from tkinter.scrolledtext import ScrolledText
 
 APP_NAME = "STA 2e Combat Helper"
 APP_VERSION = "1.1.0"
-SAVE_FORMAT_VERSION = 2
+SAVE_FORMAT_VERSION = 3
 
 
 def app_dir() -> str:
@@ -86,6 +86,31 @@ MINOR_DAMAGE_TABLE = [
     (19, 20, "Re-roll", "Roll again on this table."),
 ]
 MINOR_DAMAGE_REROLL = "Re-roll"
+
+# Nature of Breach table (d20), rolled whenever a breach is inflicted on a system.
+# Listed from least to most severe; a system keeps its most severe condition.
+BREACH_NATURE_TABLE = [
+    (1, 4, "Damaged",
+     "Subsystem is mostly functional. The GM is encouraged to spend Threat to cause "
+     "complications."),
+    (5, 8, "Malfunctioning",
+     "A character must take the Restore minor action each turn before any task using this "
+     "subsystem can be attempted."),
+    (9, 12, "Primary Offline",
+     "Primary Offline, Switching to Backup: backup systems engaged, +1 Difficulty to all tasks "
+     "using this subsystem."),
+    (13, 16, "Failing",
+     "Subsystem losing power: +1 Difficulty to all tasks using this subsystem. The GM may "
+     "spend 1 Threat to set it Offline."),
+    (17, 20, "Offline",
+     "Subsystem completely shut down / destroyed: tasks using it cannot be attempted."),
+]
+BREACH_NATURES = [n for _lo, _hi, n, _d in BREACH_NATURE_TABLE]
+BREACH_SEVERITY = {n: i for i, n in enumerate(BREACH_NATURES)}
+BREACH_DIFFICULTY = {"Primary Offline": 1, "Failing": 1}
+BREACH_SHORT = {"Damaged": "Damaged", "Malfunctioning": "Malfunctioning",
+                "Primary Offline": "Primary Offline (+1 Diff)", "Failing": "Failing (+1 Diff)",
+                "Offline": "OFFLINE"}
 
 # Random system hit table: (low, high, system). The die size is the top value.
 SYSTEM_HIT_TABLE = [
@@ -205,21 +230,55 @@ DEVASTATING_ATTACK_COST = 2    # Momentum (1 with Spread)
 
 def _action(kind, system, *, roll=True, attr=None, dept=None, assist=None, base=0,
             reminder="", attack=False, needs_target=False, range_penalty=False,
-            requires_power=False, sensor=False, task_label="Task"):
+            requires_power=False, sensor=False, task_label="Task", custom_base=False):
     return {
         "kind": kind, "system": system, "roll": roll, "attr": attr, "dept": dept,
         "task_label": task_label,
         "assist": assist, "base": base, "reminder": reminder, "attack": attack,
         "needs_target": needs_target, "range_penalty": range_penalty,
-        "requires_power": requires_power, "sensor": sensor,
+        "requires_power": requires_power, "sensor": sensor, "custom_base": custom_base,
     }
 
 
-# Station -> Action -> definition.
-#   system: ship system the action draws on (used for the NPC "re-use" check).
+def _standard_minors() -> dict:
+    """Minor actions any crew member can take, whatever their station."""
+    return {
+        "Change Position": _action(
+            "Minor", None, roll=False,
+            reminder="Move to another bridge station or ship location. Minor Action - does not "
+                     "use a turn."),
+        "Interact": _action(
+            "Minor", None, roll=False,
+            reminder="Interact with a console or object in the environment. Minor Action."),
+        "Prepare": _action(
+            "Minor", None, roll=False,
+            reminder="Set up for a task - required before Warp and for raising / lowering "
+                     "shields or arming weapons. Minor Action."),
+        "Restore": _action(
+            "Minor", None, roll=False,
+            reminder="Minor adjustments or repairs after disruption: a Malfunctioning "
+                     "subsystem can be used for the rest of this turn. Minor Action."),
+    }
+
+
+def _create_trait(attrs, depts, assist, purpose) -> dict:
+    """Station-specific Create Trait (Major, Difficulty 2)."""
+    return _action(
+        "Major", assist[0] if assist else None, attr=attrs, dept=depts, assist=assist,
+        base=2, task_label="Suggested task",
+        reminder=f"Difficulty 2. Create, alter or remove a trait for {purpose}. On success the "
+                 "trait goes into the Scene Traits list.")
+
+
+STANDARD_STATION = "Starship Standard Actions"
+
+# Station -> Action -> definition. Each station lists its Minor actions first.
+#   system: ship system the action draws on (re-use check, breach conditions).
 #   assist: (System, Department) the ship rolls when it assists the task.
+#   kind:   Major (uses a turn), Minor, or Free.
 BRIDGE_STATIONS = {
     "Command": {
+        **_standard_minors(),
         "Direct": _action(
             "Major", "Communications", roll=False, attr="Control", dept="Command",
             task_label="Commander's assist die",
@@ -235,6 +294,9 @@ BRIDGE_STATIONS = {
             "Major", "Communications", roll=False,
             reminder="The commander may assist TWO allies' tasks instead of one. Each assist "
                      "die uses the commander's own Attribute + Department for that task."),
+        "Create Trait": _create_trait("Control / Insight / Reason", "Command",
+                                      ("Computers", "Command"),
+                                      "tactical plans and strategies"),
     },
     "Conn / Helm": {
         "Impulse": _action(
@@ -273,6 +335,8 @@ BRIDGE_STATIONS = {
             reminder="Requires Reserve Power and a prior Prepare (Warp) minor action. On "
                      "success move up to the ship's Engines score in zones, or leave the "
                      "battle. Reserve Power is consumed by the attempt."),
+        "Create Trait": _create_trait("Control / Daring", "Conn", ("Engines", "Conn"),
+                                      "positioning and maneuvers"),
     },
     "Tactical": {
         "Prepare": _action(
@@ -287,6 +351,10 @@ BRIDGE_STATIONS = {
             reminder="Target an enemy within Long range. The next attack may re-roll 1d20 "
                      "OR choose which system is hit (pick the benefit when you Fire). With Fast "
                      "Targeting Systems it gets BOTH."),
+        "Decloak": _action(
+            "Minor", "Engines", roll=False,
+            reminder="Drop the cloak (Minor Action - does not use a turn). Shields stay down "
+                     "until raised with Prepare."),
         "Fire": _action(
             "Major", "Weapons", attr="Control", dept="Security", assist=("Weapons", "Security"),
             base=ENERGY_BASE_DIFFICULTY, attack=True, needs_target=True,
@@ -301,22 +369,20 @@ BRIDGE_STATIONS = {
         "Modulate Shields": _action(
             "Major", "Structure", roll=False,
             reminder="The ship's Resistance increases by +2 until End Round."),
-        "Cloak": _action(
-            "Major", "Engines", attr="Control", dept="Engineering",
-            assist=("Engines", "Security"), base=2, requires_power=True,
-            reminder="Cloaking Device talent only. Requires Reserve Power (consumed). Success: "
-                     "the ship gains the Cloaked trait - Shields drop to 0 and cannot be raised, "
-                     "it cannot attack, and enemies must Reveal it before targeting it."),
-        "Decloak": _action(
-            "Minor", "Engines", roll=False,
-            reminder="Drop the cloak (Minor Action - does not use a turn). Shields stay down "
-                     "until raised with Prepare."),
         "Tractor Beam": _action(
             "Major", "Structure", attr="Control", dept="Security",
             assist=("Structure", "Security"), base=2, needs_target=True,
             reminder="Target within Close range. On success the target is immobilised; the "
                      "tractor beam's Strength is the ship's Tractor Beam rating (default "
                      "Scale - 1)."),
+        "Cloak": _action(
+            "Major", "Engines", attr="Control", dept="Engineering",
+            assist=("Engines", "Security"), base=2, requires_power=True,
+            reminder="Cloaking Device talent only. Requires Reserve Power (consumed). Success: "
+                     "the ship gains the Cloaked trait - Shields drop to 0 and cannot be raised, "
+                     "it cannot attack, and enemies must Reveal it before targeting it."),
+        "Create Trait": _create_trait("Control / Reason", "Security", ("Weapons", "Security"),
+                                      "weapon modifications or targeting data"),
     },
     "Sensor Operations": {
         "Calibrate Sensors": _action(
@@ -339,8 +405,11 @@ BRIDGE_STATIONS = {
             "Major", "Sensors", attr="Reason", dept="Science", assist=("Sensors", "Science"),
             base=3, sensor=True,
             reminder="Reveal a cloaked or hidden vessel within Long range."),
+        "Create Trait": _create_trait("Reason / Control", "Science", ("Sensors", "Science"),
+                                      "discovered information or phenomena"),
     },
     "Operations / Engineering": {
+        **_standard_minors(),
         "Damage Control": _action(
             "Major", "Structure", attr="Presence", dept="Engineering",
             assist=("Structure", "Engineering"), base=2,
@@ -362,9 +431,68 @@ BRIDGE_STATIONS = {
                      "that system receives the Reserve Power boost."),
         "Transport": _action(
             "Major", "Sensors", attr="Control", dept="Engineering",
-            assist=("Sensors", "Engineering"), base=2,
-            reminder="Remote transporter operation. Difficulty varies with circumstances "
-                     "(default 2 - use the GM Modifier). Shields usually must be lowered."),
+            assist=("Sensors", "Engineering"), base=1,
+            reminder="Remote transporter operation. Difficulty 1+ - add Difficulty for "
+                     "interference, range or moving targets with the GM Modifier. Shields "
+                     "usually must be lowered."),
+        "Create Trait": _create_trait("Control / Reason", "Engineering",
+                                      ("Engines", "Engineering"),
+                                      "system modifications or power rerouting"),
+    },
+    "Communications": {
+        **_standard_minors(),
+        "Send / Respond to Hail": _action(
+            "Free", "Communications", roll=False,
+            reminder="Free Action: open or answer a hailing frequency (no turn, no Minor "
+                     "Action)."),
+        "Internal Comms": _action(
+            "Free", "Communications", roll=False,
+            reminder="Free Action: ship-wide or internal communication (no turn, no Minor "
+                     "Action)."),
+        "Damage Control": _action(
+            "Major", "Structure", attr="Presence", dept="Engineering",
+            assist=("Structure", "Engineering"), base=2,
+            reminder="Success: patch 1 breach. Breaches from Devastating weapons add +1 "
+                     "Difficulty."),
+        "Transport": _action(
+            "Major", "Sensors", attr="Control", dept="Engineering",
+            assist=("Sensors", "Engineering"), base=1,
+            reminder="Remote transporter operation. Difficulty 1+ - add Difficulty for "
+                     "interference, range or moving targets with the GM Modifier. Shields "
+                     "usually must be lowered."),
+        "Create Trait": _create_trait("Control / Reason", "Engineering / Command",
+                                      ("Communications", "Engineering"),
+                                      "encryption, jamming or coordination"),
+    },
+    STANDARD_STATION: {
+        **_standard_minors(),
+        "Create / Alter Trait": _action(
+            "Major", None, attr="Appropriate Attribute", dept="Department", base=2,
+            task_label="Suggested task",
+            reminder="Difficulty 2. Create, change or remove a trait in the scene using an "
+                     "appropriate Attribute + Department (set them in the Action Resolver)."),
+        "Assist": _action(
+            "Major", None, roll=False,
+            reminder="Nominate an ally: you assist their next task with your own Attribute + "
+                     "Department."),
+        "Override": _action(
+            "Major", None, roll=False,
+            reminder="Control another position from your current console: pick the station "
+                     "and action to perform - that task is +1 Difficulty (the Override box in "
+                     "Action Options is ticked for you). Override itself uses no extra turn."),
+        "Pass": _action(
+            "Major", None, roll=False,
+            reminder="Decline to take a Major Action this turn (the turn is still used). "
+                     "Allowed while Bracing for Impact."),
+        "Ready": _action(
+            "Major", None, roll=False,
+            reminder="Declare a Major Action and the event that triggers it; it is resolved "
+                     "as a reaction when that happens (until End Round)."),
+        "Other Tasks": _action(
+            "Major", None, attr="GM's choice", dept="GM's choice", custom_base=True,
+            reminder="Any other task the GM calls for, including Extended Tasks. Set its base "
+                     "Difficulty in Action Options and the Attribute / Department in the "
+                     "Action Resolver."),
     },
 }
 
@@ -498,6 +626,7 @@ class Ship:
     small_craft_deployed: int = 0
     secondary_reactors_used: bool = False   # once per scene
     breaches: dict = field(default_factory=lambda: {s: 0 for s in SYSTEMS})
+    breach_conditions: dict = field(default_factory=lambda: {s: "" for s in SYSTEMS})
     devastating_systems: list = field(default_factory=list)
     complications: list = field(default_factory=list)
     persistent_effects: list = field(default_factory=list)   # [{amount, rounds, source}]
@@ -514,6 +643,8 @@ class Ship:
     # --- per-round state (reset by End Round) ------------------------------
     turns_used: int = 0
     systems_used: list = field(default_factory=list)
+    restored_systems: list = field(default_factory=list)   # Restore minor action this turn
+    readied_action: str = ""
     resistance_bonus: int = 0
     evasive: bool = False
     defensive_fire: bool = False
@@ -599,8 +730,29 @@ class Ship:
         if self.stored_shields >= 0:
             self.stored_shields = clamp(self.stored_shields, 0, self.max_shields)
 
+    def breach_condition(self, system: str) -> str:
+        return self.breach_conditions.get(system, "") if self.breaches.get(system, 0) else ""
+
+    def set_breach_condition(self, system: str, nature: str, force: bool = False) -> str:
+        """Attach a Nature of Breach; the most severe condition wins unless forced."""
+        current = self.breach_conditions.get(system, "")
+        if not nature:
+            if force:
+                self.breach_conditions[system] = ""
+            return self.breach_conditions.get(system, "")
+        if force or not current or BREACH_SEVERITY[nature] >= BREACH_SEVERITY.get(current, -1):
+            self.breach_conditions[system] = nature
+        return self.breach_conditions[system]
+
+    def needs_restore(self, system: str) -> bool:
+        return (self.breach_condition(system) == "Malfunctioning"
+                and system not in self.restored_systems)
+
     def normalize(self) -> None:
         """Keep derived limits consistent after talents / Scale change."""
+        for sysname in SYSTEMS:
+            if not self.breaches.get(sysname, 0):
+                self.breach_conditions[sysname] = ""
         self.clamp_shields()
         self.crew_support_used = clamp(self.crew_support_used, 0, self.crew_support_max)
         self.small_craft_deployed = clamp(self.small_craft_deployed, 0,
@@ -638,6 +790,8 @@ class Ship:
         """Clear everything that only lasts until the end of the round."""
         self.turns_used = 0
         self.systems_used = []
+        self.restored_systems = []
+        self.readied_action = ""
         self.resistance_bonus = 0
         self.evasive = False
         self.defensive_fire = False
@@ -668,6 +822,7 @@ class Ship:
         self.stored_shields = -1
         self.shields = self.max_shields
         self.breaches = {s: 0 for s in SYSTEMS}
+        self.breach_conditions = {s: "" for s in SYSTEMS}
         self.devastating_systems = []
         self.complications = []
         self.reserve_power = True
@@ -713,6 +868,13 @@ class Ship:
             fx.append(f"Power rerouted to {self.rerouted_power}")
         if self.warp_prepared:
             fx.append("Prepared for Warp")
+        if self.readied_action:
+            fx.append(f"Readied: {self.readied_action}")
+        for sysname in SYSTEMS:
+            cond = self.breach_condition(sysname)
+            if cond:
+                fx.append(f"{sysname}: {BREACH_SHORT[cond]}"
+                          + (" (restored this turn)" if sysname in self.restored_systems else ""))
         for eff in self.persistent_effects:
             fx.append(f"Persistent {eff.get('amount', 1)} dmg x{eff.get('rounds', 1)} round(s) "
                       f"({eff.get('source', '?')})")
@@ -736,7 +898,7 @@ class Ship:
             data["base_resistance"] = data["resistance"]
         ship = cls(name=str(data["name"]).strip())
         for f in fields(cls):
-            if f.name in ("name", "weapons") or f.name not in data:
+            if f.name in ("name", "weapons", "breach_conditions") or f.name not in data:
                 continue
             default = getattr(ship, f.name)
             value = data[f.name]
@@ -758,6 +920,12 @@ class Ship:
             setattr(ship, f.name, value)
         ship.weapons = [Weapon.from_dict(w) for w in data.get("weapons", []) or []
                         if isinstance(w, dict)]
+        conditions = data.get("breach_conditions")
+        if isinstance(conditions, dict):
+            for sysname in SYSTEMS:
+                value = conditions.get(sysname, "")
+                if isinstance(value, str) and value in BREACH_SEVERITY:
+                    ship.breach_conditions[sysname] = value
         # normalise
         if ship.crew_quality not in CREW_QUALITY:
             ship.crew_quality = DEFAULT_CREW_QUALITY
@@ -784,10 +952,11 @@ class Ship:
             if ship.stored_shields < 0:
                 ship.stored_shields = ship.shields
             ship.shields = 0
-        ship.normalize()
         ship.breaches = {s: max(0, v) for s, v in ship.breaches.items()}
+        ship.normalize()
         ship.devastating_systems = [s for s in ship.devastating_systems if s in SYSTEMS]
         ship.systems_used = [s for s in ship.systems_used if s in SYSTEMS]
+        ship.restored_systems = [s for s in ship.restored_systems if s in SYSTEMS]
         ship.complications = [str(c) for c in ship.complications]
         ship.persistent_effects = [
             {"amount": max(1, to_int(e.get("amount", 1), 1)),
@@ -880,7 +1049,8 @@ def parse_roster_data(data) -> tuple:
     if isinstance(data, dict) and "ships" in data:
         entries = data.get("ships") or []
         meta = {k: data[k] for k in ("round", "threat", "momentum", "gm_modifier",
-                                     "attacker", "target", "system_hit_table") if k in data}
+                                     "attacker", "target", "system_hit_table",
+                                     "scene_traits") if k in data}
     elif isinstance(data, list):
         entries = data
     elif isinstance(data, dict) and "name" in data:
@@ -1030,6 +1200,32 @@ def roll_minor_damage(rng=random) -> tuple:
     return rolls, MINOR_DAMAGE_TABLE[0][2]
 
 
+def breach_nature_lookup(roll: int) -> str:
+    for low, high, name, _desc in BREACH_NATURE_TABLE:
+        if low <= roll <= high:
+            return name
+    raise ValueError(f"roll {roll} outside Nature of Breach table")
+
+
+def breach_nature_description(name: str) -> str:
+    return next((d for _l, _h, n, d in BREACH_NATURE_TABLE if n == name), "")
+
+
+def roll_breach_nature(rng=random) -> tuple:
+    roll = rng.randint(1, 20)
+    return roll, breach_nature_lookup(roll)
+
+
+def action_systems(adef) -> list:
+    """Ship systems a task draws on: the station system plus the ship-assist system."""
+    systems = []
+    if adef and adef.get("system"):
+        systems.append(adef["system"])
+    if adef and adef.get("assist") and adef["assist"][0] not in systems:
+        systems.append(adef["assist"][0])
+    return systems
+
+
 def system_hit_lookup(roll: int, table=None) -> str:
     for low, high, system in table or SYSTEM_HIT_TABLE:
         if low <= roll <= high:
@@ -1107,15 +1303,20 @@ def range_penalty(range_band: str) -> int:
 
 
 def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
-                       range_band: str = "Close", gm_modifier: int = 0, target=None):
-    """Total Difficulty = Base + Weapon modifiers + context (talents, range...) + GM Modifier.
+                       range_band: str = "Close", gm_modifier: int = 0, target=None,
+                       override: bool = False, custom_base=None):
+    """Total Difficulty = Base + Weapon modifiers + context (talents, breaches, range...)
+    + GM Modifier.
 
     Returns (total, [(label, value), ...]) or (None, []) for actions without a roll."""
     if not adef or not adef["roll"]:
         return None, []
     parts = []
     base = adef["base"]
-    if action_name == "Fire":
+    if adef.get("custom_base") and custom_base is not None:
+        base = max(0, to_int(custom_base, base))
+        parts.append(("Base (GM set)", base))
+    elif action_name == "Fire":
         if weapon is not None and weapon.wtype == "Torpedo":
             base = TORPEDO_BASE_DIFFICULTY
             parts.append(("Base (Torpedo)", base))
@@ -1142,6 +1343,12 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
             parts.append(("Jammed", 1))
         if action_name == "Damage Control" and ship.devastating_systems:
             parts.append(("Devastating breaches", 1))
+        for sysname in action_systems(adef):
+            condition = ship.breach_condition(sysname)
+            if BREACH_DIFFICULTY.get(condition):
+                parts.append((f"{condition} breach: {sysname}", BREACH_DIFFICULTY[condition]))
+    if override:
+        parts.append(("Override from another console", 1))
     if target is not None and target is not ship:
         if target.cloaked and action_name in TARGETED_ACTIONS:
             parts.append(("Target Cloaked", 1))
@@ -1153,6 +1360,19 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
     parts.append(("GM Modifier", gm_modifier))
     total = max(0, sum(v for _label, v in parts))
     return total, parts
+
+
+def format_difficulty_hint(total, parts) -> str:
+    """Compact form for the Rule Hints, e.g.
+    'Base 2 + 1 (Failing breach: Engines) + 1 (GM Modifier) = Total Difficulty 4'."""
+    if total is None:
+        return "No task roll required."
+    label, value = parts[0]
+    text = f"{label} {value}"
+    for label, value in parts[1:]:
+        if value:
+            text += f" {'+' if value > 0 else '-'} {abs(value)} ({label})"
+    return f"{text} = Total Difficulty {total}"
 
 
 def format_difficulty(total, parts) -> str:
@@ -1361,6 +1581,70 @@ class ShakenDialog(tk.Toplevel):
     @classmethod
     def ask(cls, parent, ship_name, reason, rng=random):
         dlg = cls(parent, ship_name, reason, rng)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+class BreachNatureDialog(tk.Toplevel):
+    """Nature of Breach resolver: auto-roll a d20 or pick the condition from a dropdown."""
+
+    def __init__(self, parent, ship_name: str, system: str, reason: str, current: str = "",
+                 rng=random):
+        super().__init__(parent)
+        self.title(f"Nature of Breach - {ship_name} {system}")
+        self.resizable(False, False)
+        self.rng = rng
+        self.result = None
+        self.roll = None
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=f"BREACH: {ship_name} - {system}", style="Alert.TLabel").pack(
+            anchor="w")
+        ttk.Label(frm, text=f"Cause: {reason}" + (f"   (current condition: {current})"
+                                                  if current else ""),
+                  wraplength=480).pack(anchor="w", pady=(0, 8))
+        box = ttk.LabelFrame(frm, text="Nature of Breach (d20)", padding=8)
+        box.pack(fill="x")
+        for low, high, name, desc in BREACH_NATURE_TABLE:
+            ttk.Label(box, text=f"{low}-{high}  {name}: {desc}", wraplength=470,
+                      justify="left").pack(anchor="w", pady=1)
+        pick = ttk.Frame(frm)
+        pick.pack(fill="x", pady=(8, 0))
+        ttk.Label(pick, text="Condition:").pack(side="left")
+        self.var = tk.StringVar(value=BREACH_NATURES[0])
+        self.combo = ttk.Combobox(pick, textvariable=self.var, values=BREACH_NATURES,
+                                  state="readonly", width=18)
+        self.combo.pack(side="left", padx=6)
+        self.combo.bind("<<ComboboxSelected>>", lambda _e: self._manual())
+        self.roll_lbl = ttk.Label(frm, text="Pick a condition manually, or Auto-Roll.",
+                                  wraplength=480)
+        self.roll_lbl.pack(anchor="w", pady=8)
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Auto-Roll d20", command=self.auto_roll).pack(side="left")
+        ttk.Button(btns, text="Apply", style="Accent.TButton", command=self._apply).pack(
+            side="right")
+        ttk.Button(btns, text="Skip", command=self.destroy).pack(side="right", padx=6)
+        make_modal(self, parent)
+
+    def auto_roll(self):
+        self.roll, name = roll_breach_nature(self.rng)
+        self.var.set(name)
+        self.roll_lbl.configure(text=f"Rolled {self.roll}: {name} - "
+                                     f"{breach_nature_description(name)}")
+
+    def _manual(self):
+        self.roll = None
+        name = self.var.get()
+        self.roll_lbl.configure(text=f"Chosen: {name} - {breach_nature_description(name)}")
+
+    def _apply(self):
+        self.result = (self.var.get(), self.roll)
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, ship_name, system, reason, current="", rng=random):
+        dlg = cls(parent, ship_name, system, reason, current, rng)
         parent.wait_window(dlg)
         return dlg.result
 
@@ -1748,6 +2032,7 @@ class CombatHelperApp:
         self.round = 1
         self.threat = 0
         self.momentum = 0
+        self.scene_traits: list = []
         self.dirty = False
         self.pending_attack = None
         self.last_system_hit = None
@@ -1794,6 +2079,8 @@ class CombatHelperApp:
         style.configure("Info.TLabel", foreground="#333344")
         style.configure("Major.TLabel", font=self.font_bold, foreground="#ffffff",
                         background="#b03a2e", padding=(6, 1))
+        style.configure("Free.TLabel", font=self.font_bold, foreground="#ffffff",
+                        background="#1e7e46", padding=(6, 1))
         style.configure("Minor.TLabel", font=self.font_bold, foreground="#ffffff",
                         background="#1f5fbf", padding=(6, 1))
         for name, color, active in (("Accent", "#1f5fbf", "#2f74db"),
@@ -1817,6 +2104,8 @@ class CombatHelperApp:
         self.tsol_mode_var = tk.StringVar(value="reroll")
         self.scan_mode_var = tk.StringVar(value="damage")
         self.regen_boost_var = tk.BooleanVar(value=False)
+        self.override_var = tk.BooleanVar(value=False)
+        self.other_base_var = tk.IntVar(value=2)
         self.crew_attr_var = tk.IntVar(value=10)
         self.crew_dept_var = tk.IntVar(value=3)
         self.focus_var = tk.BooleanVar(value=True)
@@ -1847,7 +2136,8 @@ class CombatHelperApp:
         for var in (self.gm_mod_var, self.weapon_var, self.salvo_var, self.range_var,
                     self.tsol_mode_var, self.scan_mode_var, self.regen_boost_var,
                     self.crew_attr_var, self.crew_dept_var, self.focus_var, self.dice_var,
-                    self.autopay_var, self.assist_var, self.mode_var, self.opp_var):
+                    self.autopay_var, self.assist_var, self.mode_var, self.opp_var,
+                    self.override_var, self.other_base_var):
             var.trace_add("write", lambda *_a: self._on_option_change())
         for var in (self.dmg_base_var, self.dmg_bonus_var, self.pierce_var, self.devastate_var):
             var.trace_add("write", lambda *_a: self._on_damage_option_change())
@@ -2107,6 +2397,12 @@ class CombatHelperApp:
         self.kind_lbl.grid(row=0, column=2, rowspan=2, padx=(8, 0))
         self.actor_lbl = ttk.Label(sf, text="", style="Bold.TLabel", wraplength=440)
         self.actor_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.breach_warn_lbl = tk.Label(sf, text="", justify="left", anchor="w",
+                                        wraplength=440, font=self.font_bold,
+                                        foreground="#8b1a10", background="#fde3df",
+                                        padx=6, pady=4, relief="solid", borderwidth=1)
+        self.breach_warn_lbl.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.breach_warn_lbl.grid_remove()
 
         of = ttk.LabelFrame(body, text="Action Options", padding=6)
         of.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -2148,6 +2444,16 @@ class CombatHelperApp:
                                                 "Power (1/scene)",
                                        command=lambda: self.use_secondary_reactors())
         self.secreact_btn.grid(row=6, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        self.override_cb = ttk.Checkbutton(of, text="Override - acting from another console "
+                                                    "(+1 Difficulty)",
+                                           variable=self.override_var)
+        self.override_cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        obf = ttk.Frame(of)
+        obf.grid(row=8, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Label(obf, text="Other Task base Difficulty").pack(side="left")
+        self.other_base_sb = ttk.Spinbox(obf, from_=0, to=5, textvariable=self.other_base_var,
+                                         width=4, state="readonly")
+        self.other_base_sb.pack(side="left", padx=4)
 
         df = ttk.LabelFrame(body, text="Difficulty", padding=6)
         df.grid(row=2, column=0, sticky="ew", pady=(0, 6))
@@ -2349,23 +2655,35 @@ class CombatHelperApp:
 
         bf = ttk.LabelFrame(body, text="Breach Tracker (Target)", padding=6)
         bf.grid(row=4, column=0, sticky="ew", pady=(0, 6))
-        for col, text in enumerate(("System", "Rating", "Breaches", "", "")):
+        for col, text in enumerate(("System", "Rtg", "Br.", "", "", "Nature of Breach",
+                                    "Failing:")):
             ttk.Label(bf, text=text, style="Bold.TLabel").grid(row=0, column=col, sticky="w",
                                                                padx=2)
         self.breach_rows = {}
+        no_condition = "-"
         for i, sysname in enumerate(SYSTEMS, start=1):
-            ttk.Label(bf, text=sysname).grid(row=i, column=0, sticky="w", padx=2)
+            ttk.Label(bf, text=SYSTEM_ABBR[sysname]).grid(row=i, column=0, sticky="w", padx=2)
             rating = ttk.Label(bf, text="-")
             rating.grid(row=i, column=1, sticky="w", padx=2)
-            count = ttk.Label(bf, text="0", style="Bold.TLabel", width=12)
+            count = ttk.Label(bf, text="0", style="Bold.TLabel", width=3)
             count.grid(row=i, column=2, sticky="w", padx=2)
-            ttk.Button(bf, text="-", width=3,
+            ttk.Button(bf, text="-", width=2,
                        command=lambda s=sysname: self.adjust_breach(s, -1)).grid(row=i, column=3)
-            ttk.Button(bf, text="+", width=3,
+            ttk.Button(bf, text="+", width=2,
                        command=lambda s=sysname: self.adjust_breach(s, 1)).grid(row=i, column=4)
-            self.breach_rows[sysname] = (rating, count)
+            cond_var = tk.StringVar(value=no_condition)
+            cond_cb = ttk.Combobox(bf, textvariable=cond_var, state="readonly", width=13,
+                                   values=[no_condition] + BREACH_NATURES)
+            cond_cb.grid(row=i, column=5, sticky="w", padx=(6, 2), pady=1)
+            cond_cb.bind("<<ComboboxSelected>>", lambda _e, s=sysname, v=cond_var:
+                         self.set_breach_condition_manual(s, "" if v.get() == "-" else v.get()))
+            off_btn = ttk.Button(bf, text="\u2192 Offline",
+                                 command=lambda s=sysname: self.failing_to_offline(s))
+            off_btn.grid(row=i, column=6, sticky="w")
+            self.breach_rows[sysname] = {"rating": rating, "count": count, "cond": cond_cb,
+                                         "cond_var": cond_var, "offline": off_btn}
         self.breach_total_lbl = ttk.Label(bf, text="", wraplength=430, justify="left")
-        self.breach_total_lbl.grid(row=len(SYSTEMS) + 1, column=0, columnspan=5, sticky="w",
+        self.breach_total_lbl.grid(row=len(SYSTEMS) + 1, column=0, columnspan=7, sticky="w",
                                    pady=(4, 0))
 
         cf2 = ttk.LabelFrame(body, text="Complications & Effects (Target)", padding=6)
@@ -2380,6 +2698,18 @@ class CombatHelperApp:
         ttk.Button(cbf, text="Remove", command=self.remove_complication).pack(side="left", padx=3)
         ttk.Button(cbf, text="Clear Temp Effects", command=self.clear_target_effects).pack(
             side="left")
+
+        stf = ttk.LabelFrame(body, text="Scene Traits", padding=6)
+        stf.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+        stf.columnconfigure(0, weight=1)
+        self.trait_lb = tk.Listbox(stf, height=3, exportselection=False)
+        self.trait_lb.grid(row=0, column=0, sticky="ew")
+        tbf = ttk.Frame(stf)
+        tbf.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(tbf, text="Add Trait...", command=self.add_scene_trait).pack(side="left")
+        ttk.Button(tbf, text="Remove", command=self.remove_scene_trait).pack(side="left", padx=3)
+        ttk.Label(tbf, text="(Create Trait actions add here)", style="Info.TLabel").pack(
+            side="left", padx=4)
 
     # ---------------------------------------------------------------- the log
     def _build_log(self, parent):
@@ -2496,6 +2826,10 @@ class CombatHelperApp:
 
     def ask_shaken_result(self, ship, reason):
         return ShakenDialog.ask(self.root, ship.name, reason, self.rng)
+
+    def ask_breach_nature(self, ship, system, reason):
+        return BreachNatureDialog.ask(self.root, ship.name, system, reason,
+                                      ship.breach_condition(system), self.rng)
 
     # ================================================================ logging
     def log(self, message, tag="info"):
@@ -2785,7 +3119,15 @@ class CombatHelperApp:
         if adef is None:
             return
         self.kind_lbl.configure(text=adef["kind"].upper(),
-                                style="Major.TLabel" if adef["kind"] == "Major" else "Minor.TLabel")
+                                style=f"{adef['kind']}.TLabel")
+        set_enabled(self.override_cb, adef["roll"])
+        set_enabled(self.other_base_sb, bool(adef.get("custom_base")))
+        warnings = [w for w, level in self._breach_warnings(ship, name, adef) if level == "warn"]
+        if warnings:
+            self.breach_warn_lbl.configure(text="\n".join(warnings))
+            self.breach_warn_lbl.grid()
+        else:
+            self.breach_warn_lbl.grid_remove()
         self.actor_lbl.configure(
             text=f"Acting: {ship.name if ship else '-'}   ->   Target: "
                  f"{target.name if target else '-'}")
@@ -2797,7 +3139,7 @@ class CombatHelperApp:
         fts = ship is not None and ship.has_talent("Fast Targeting Systems")
         set_enabled(self.tsol_rb1, tsol and not fts)
         set_enabled(self.tsol_rb2, tsol and not fts)
-        self.tsol_both_lbl.configure(text="BOTH (Fast Targeting)" if fts else "")
+        self.tsol_both_lbl.configure(text="BOTH" if fts else "")
         set_enabled(self.scan_rb1, name == "Scan for Weakness")
         set_enabled(self.scan_rb2, name == "Scan for Weakness")
         set_enabled(self.regen_cb, name == "Regenerate Shields")
@@ -2866,12 +3208,47 @@ class CombatHelperApp:
             return "defensive"
         return None
 
+    @staticmethod
+    def _be(sysname):
+        return "is" if sysname == "Structure" else "are"
+
+    def _breach_warnings(self, ship, name, adef):
+        """(text, level) pairs for breach conditions on the systems this action uses.
+        level "warn" is shown in the prominent warning box."""
+        out = []
+        if ship is None or adef is None or name == "Restore":
+            return out
+        for sysname in action_systems(adef):
+            cond = ship.breach_condition(sysname)
+            be = self._be(sysname)
+            if cond == "Offline":
+                out.append((f"\u26d4 WARNING: {sysname} {be} OFFLINE! Actions using this "
+                            "subsystem cannot be attempted (GM override only).", "warn"))
+            elif cond == "Malfunctioning" and sysname in ship.restored_systems:
+                out.append((f"{sysname} {be} Malfunctioning - Restore already taken this turn.",
+                            "info"))
+            elif cond == "Malfunctioning":
+                out.append((f"\u26a0 WARNING: {sysname} {be} Malfunctioning! A 'Restore' minor "
+                            "action is required this turn before taking Major Actions or tasks "
+                            "that use it.", "warn"))
+            elif cond == "Failing":
+                out.append((f"\u26a0 WARNING: {sysname} {be} Failing: +1 Difficulty (included). "
+                            "The GM may spend 1 Threat to set it Offline (Breach Tracker).",
+                            "warn"))
+            elif cond == "Primary Offline":
+                out.append((f"\u26a0 {sysname}: Primary Offline, switching to backup - +1 "
+                            "Difficulty (included).", "warn"))
+            elif cond == "Damaged":
+                out.append((f"{sysname} {be} Damaged: mostly functional - the GM may spend "
+                            "Threat to cause a complication.", "info"))
+        return out
+
     def _hint_lines(self, name, adef, ship, target, weapon, total):
         L = []
         station = self.station_var.get()
-        L.append((f"{name.upper()}  -  {station}  -  {adef['kind']} Action"
-                  + ("  (uses a turn)" if adef["kind"] == "Major" else "  (does not use a turn)"),
-                  "head"))
+        turn_note = {"Major": "  (uses a turn)", "Minor": "  (does not use a turn)",
+                     "Free": "  (free - no turn, no Minor Action)"}.get(adef["kind"], "")
+        L.append((f"{name.upper()}  -  {station}  -  {adef['kind']} Action{turn_note}", "head"))
         a_val, d_val = int_var_value(self.crew_attr_var, 10), int_var_value(self.crew_dept_var, 3)
         if adef["attr"] and adef["dept"]:
             crit = max(1, d_val) if self.focus_var.get() else 1
@@ -2886,17 +3263,22 @@ class CombatHelperApp:
                 sv, dv = ship.systems.get(s_sys, 0), ship.departments.get(s_dept, 0)
                 L.append((f"Ship Assist: {s_sys} + {s_dept}  ->  TN {sv + dv} ({sv} + {dv}), "
                           f"crit on {max(1, dv)} or less", "key"))
-                if ship.breaches.get(s_sys):
-                    L.append((f"  ! {s_sys} has {ship.breaches[s_sys]} breach(es) - apply "
-                              "damaged-system penalties via the GM Modifier if your table "
-                              "uses them.", "warn"))
+                if ship.breaches.get(s_sys) and not ship.breach_condition(s_sys):
+                    L.append((f"  ! {s_sys} has {ship.breaches[s_sys]} breach(es) but no Nature "
+                              "of Breach - set it in the Breach Tracker.", "warn"))
             else:
                 L.append((f"Ship Assist: {s_sys} + {s_dept}", "key"))
         else:
             L.append(("Ship Assist: none", ""))
-        L.append((f"Ship system used: {adef['system']}", ""))
+        L.append((f"Ship system used: {adef['system']}" if adef["system"]
+                  else "Ship system used: none (standard action)", ""))
         if total is not None:
-            L.append((f"Difficulty: {total}", "key"))
+            base_total, parts = self.compute_current_difficulty()
+            if base_total == total:
+                L.append(("Difficulty: " + format_difficulty_hint(total, parts), "key"))
+            else:
+                L.append((f"Difficulty: Total Difficulty {total} (opposed: defender's successes "
+                          "+ modifiers)", "key"))
         L.append(("Rule: " + adef["reminder"], ""))
 
         if name == "Fire":
@@ -2915,17 +3297,30 @@ class CombatHelperApp:
                 L.append((f"! {ship.name} has no weapons - add some in the ship editor.", "warn"))
         if name == "Direct":
             L.append(("Cost: 1 Momentum (NPC: 1 Threat).", "warn"))
+        if name in ("Create Trait", "Create / Alter Trait"):
+            L.append(("On success you name the new trait, or pick one to alter or remove. "
+                      f"Scene traits now: {len(self.scene_traits)}.", "good"))
+        if name == "Restore" and ship:
+            pending = [s_ for s_ in SYSTEMS if ship.needs_restore(s_)]
+            L.append(("Restore: " + (", ".join(pending) + " can be restored this turn."
+                                     if pending else "no Malfunctioning subsystem needs it."),
+                      "good" if pending else ""))
 
         alerts = []
+        for text, level in self._breach_warnings(ship, name, adef):
+            if level == "warn":
+                alerts.append(text)
+            else:
+                L.append((text, ""))
         if ship:
             if adef["kind"] == "Major":
                 if ship.turns_used >= ship.scale:
                     alerts.append(f"Turn budget used up: {ship.turns_used}/{ship.scale} "
                                   f"(Scale {ship.scale}).")
-                if adef["system"] in ship.systems_used:
+                if adef["system"] and adef["system"] in ship.systems_used:
                     alerts.append(f"{adef['system']} already used this round - re-using it "
                                   "costs 1 Threat (NPC spends, player ship adds).")
-                if ship.brace_for_impact:
+                if ship.brace_for_impact and name != "Pass":
                     alerts.append("Brace for Impact: this ship cannot take a Major Action now.")
             if adef["requires_power"] and not ship.reserve_power:
                 alerts.append("Requires Reserve Power - the ship has none (Regain Power first).")
@@ -3031,9 +3426,12 @@ class CombatHelperApp:
             self.tgt_bar.set_value(0, 0)
             self.tgt_res_lbl.configure(text="")
             self.tgt_fx_lbl.configure(text="")
-            for rating, count in self.breach_rows.values():
-                rating.configure(text="-")
-                count.configure(text="0")
+            for row in self.breach_rows.values():
+                row["rating"].configure(text="-")
+                row["count"].configure(text="0")
+                row["cond_var"].set("-")
+                set_enabled(row["cond"], False)
+                set_enabled(row["offline"], False)
             self.breach_total_lbl.configure(text="")
             self.comp_lb.delete(0, "end")
         else:
@@ -3053,13 +3451,19 @@ class CombatHelperApp:
             self.tgt_shields_up_var.set(t.shields_up)
             self.tgt_armed_var.set(t.weapons_armed)
             self.tgt_set_shields_var.set(self._target_shield_value(t))
-            for sysname, (rating, count) in self.breach_rows.items():
-                rating.configure(text=str(t.systems.get(sysname, 0)))
+            for sysname, row in self.breach_rows.items():
+                row["rating"].configure(text=str(t.systems.get(sysname, 0)))
                 n = t.breaches.get(sysname, 0)
-                dev = " (Devast.)" if sysname in t.devastating_systems else ""
-                count.configure(text=f"{n}{dev}", style="Alert.TLabel" if n else "Bold.TLabel")
+                dev = "D" if sysname in t.devastating_systems else ""
+                row["count"].configure(text=f"{n}{dev}",
+                                       style="Alert.TLabel" if n else "Bold.TLabel")
+                cond = t.breach_condition(sysname)
+                row["cond_var"].set(cond or "-")
+                set_enabled(row["cond"], n > 0)
+                set_enabled(row["offline"], cond == "Failing")
             total = t.total_breaches()
-            msg = f"Total breaches: {total}   (Scale {t.scale})"
+            msg = (f"Total breaches: {total}   (Scale {t.scale})   D = Devastating\n"
+                   "\u2192 Offline: GM spends 1 Threat to set a Failing system Offline.")
             if total and total >= t.scale:
                 msg += "\n! Breaches have reached the ship's Scale - check the rulebook for " \
                        "disabled systems / ship destruction."
@@ -3069,6 +3473,9 @@ class CombatHelperApp:
             self.comp_lb.delete(0, "end")
             for c in t.complications:
                 self.comp_lb.insert("end", c)
+        self.trait_lb.delete(0, "end")
+        for trait in self.scene_traits:
+            self.trait_lb.insert("end", trait)
         self.syshit_lbl.configure(text=self.last_system_hit or "-")
         self.syshit_btn.configure(text=f"Roll System Hit (d{self.hit_table[-1][1]})")
         self.hit_table_lbl.configure(text="  ".join(
@@ -3170,6 +3577,8 @@ class CombatHelperApp:
 
     def _talent_alert_lines(self):
         lines = []
+        if self.scene_traits:
+            lines.append(("SCENE TRAITS: " + "; ".join(self.scene_traits), "head"))
         ship, target = self.attacker, self.target
         for role, s in (("attacker", ship), ("target", target)):
             if s is None or (role == "target" and s is ship):
@@ -3177,6 +3586,14 @@ class CombatHelperApp:
             lines.append((f"{'ATTACKER' if role == 'attacker' else 'TARGET'}: {s.name}", "head"))
             status = self._talent_status(s, role)
             lines.extend(status if status else [("  (no talents or special rules)", "dim")])
+            for sysname in SYSTEMS:
+                cond = s.breach_condition(sysname)
+                if cond:
+                    restored = " - restored this turn" if sysname in s.restored_systems else ""
+                    lines.append((f"  - BREACH {sysname} x{s.breaches[sysname]}: "
+                                  f"{BREACH_SHORT[cond]}{restored}. "
+                                  f"{breach_nature_description(cond)}",
+                                  "dim" if cond == "Damaged" else "warn"))
         weapon = None
         pa = self.pending_attack
         if pa and pa.get("weapon") is not None:
@@ -3310,7 +3727,8 @@ class CombatHelperApp:
         weapon = self.selected_weapon() if name == "Fire" else None
         return compute_difficulty(name, self.current_action(), self.attacker, weapon,
                                   self.range_var.get(), int_var_value(self.gm_mod_var, 0),
-                                  target=self.target)
+                                  target=self.target, override=self.override_var.get(),
+                                  custom_base=int_var_value(self.other_base_var, 2))
 
     def resolve_action(self):
         ship = self.attacker
@@ -3320,6 +3738,9 @@ class CombatHelperApp:
         name = self.action_var.get()
         adef = self.current_action()
         if adef is None:
+            return
+        if name == "Override":
+            self._start_override(ship)
             return
         target = self.target
         if adef["needs_target"] and (target is None or target is ship):
@@ -3352,6 +3773,9 @@ class CombatHelperApp:
         if adef["kind"] == "Major":
             self._consume_turn(ship, adef["system"])
         self._apply_effect(ship, name, adef, target, weapon, outcome)
+        if self.override_var.get() and adef["roll"]:
+            self.override_var.set(False)
+            self.log(f"Override used for {name} (+1 Difficulty applied).")
         self.changed()
 
     def _precheck_action(self, ship, name, adef, weapon, target=None):
@@ -3366,7 +3790,7 @@ class CombatHelperApp:
             self.show_info("Cloak", f"{ship.name} is already cloaked.")
             return None
         if adef["kind"] == "Major":
-            if ship.brace_for_impact and not self.ask_yes_no(
+            if ship.brace_for_impact and name != "Pass" and not self.ask_yes_no(
                     "Brace for Impact!", f"{ship.name} is bracing for impact and cannot take a "
                                          "Major Action this turn.\n\nOverride and act anyway?"):
                 return None
@@ -3379,7 +3803,7 @@ class CombatHelperApp:
                 self.log(f"WARNING: {ship.name} exceeds its Scale turn limit (GM override).",
                          "alert")
             sysname = adef["system"]
-            if sysname in ship.systems_used:
+            if sysname and sysname in ship.systems_used:
                 threat_verb = "spend" if ship.side == "NPC" else "add"
                 ans = self.ask_yes_no_cancel(
                     "System already used",
@@ -3429,6 +3853,33 @@ class CombatHelperApp:
                                       "\n\nProceed anyway (GM override)?"):
                 return None
             self.log(f"GM override: {ship.name} targets the cloaked {target.name}.", "alert")
+        systems = [] if name == "Restore" else action_systems(adef)
+        for sysname in systems:
+            if ship.breach_condition(sysname) == "Offline":
+                if not self.ask_yes_no(
+                        "Subsystem offline",
+                        f"{ship.name}'s {sysname} {self._be(sysname)} OFFLINE - actions using it "
+                        "cannot be attempted.\n\nGM override and attempt it anyway?"):
+                    return None
+                self.log(f"GM override: {ship.name} uses its OFFLINE {sysname}.", "alert")
+        if adef["roll"] or adef["kind"] == "Major":
+            for sysname in systems:
+                if not ship.needs_restore(sysname):
+                    continue
+                ans = self.ask_yes_no_cancel(
+                    "Restore required",
+                    f"{ship.name}'s {sysname} {self._be(sysname)} Malfunctioning: a Restore minor "
+                    "action is required this turn before any task using it.\n\n"
+                    "Yes = take the Restore minor action now\n"
+                    "No = proceed without Restore (GM override)\n"
+                    "Cancel = abort the action")
+                if ans is None:
+                    return None
+                if ans:
+                    self._mark_restored(ship, sysname, f" before {name}")
+                else:
+                    self.log(f"GM override: {ship.name} uses its Malfunctioning {sysname} "
+                             "without Restore.", "alert")
         if ship.cloaked and name in HOSTILE_ACTIONS and not self.ask_yes_no(
                 "Cloaked", f"{ship.name} is cloaked and cannot attack or use its tractor "
                            "beam.\n\nDecloak now (Minor Action) and continue?"):
@@ -3606,12 +4057,13 @@ class CombatHelperApp:
 
     def _consume_turn(self, ship, system):
         ship.turns_used += 1
-        if system not in ship.systems_used:
+        if system and system not in ship.systems_used:
             ship.systems_used.append(system)
+        ship.restored_systems = []          # Restore lasts for the turn
         if ship.brace_for_impact:
             ship.brace_for_impact = False
             self.log(f"{ship.name}: Brace for Impact cleared (turn taken).")
-        msg = f"{ship.name} turn {ship.turns_used}/{ship.scale} used ({system})."
+        msg = f"{ship.name} turn {ship.turns_used}/{ship.scale} used ({system or 'no system'})."
         self.log(msg, "alert" if ship.turns_used > ship.scale else "info")
 
     def _apply_effect(self, ship, name, adef, target, weapon, outcome):
@@ -3626,7 +4078,25 @@ class CombatHelperApp:
             self.log(f"{ship.name} directs an ally: they take an immediate Major Action without "
                      "the +1 Difficulty penalty (assisted with Control + Command).", "success")
         elif name == "Assist":
-            self.log(f"{ship.name}'s commander assists up to two allies' next tasks.", "success")
+            if self.station_var.get() == STANDARD_STATION:
+                self.log(f"{ship.name}: a crew member assists an ally's next task.", "success")
+            else:
+                self.log(f"{ship.name}'s commander assists up to two allies' next tasks.",
+                         "success")
+        elif name == "Restore":
+            self._restore(ship)
+        elif name in ("Create Trait", "Create / Alter Trait"):
+            self._create_trait_effect(ship)
+        elif name == "Ready":
+            text = self.ask_string("Ready", f"{ship.name}: describe the trigger and the readied "
+                                            "Major Action:", "")
+            ship.readied_action = (text or "").strip() or "Major Action held for a trigger"
+            self.log(f"{ship.name} readies: {ship.readied_action} (until End Round).", "success")
+        elif name == "Pass":
+            self.log(f"{ship.name} passes - no Major Action this turn.", "success")
+        elif name in ("Change Position", "Interact", "Send / Respond to Hail", "Internal Comms",
+                      "Other Tasks"):
+            self.log(f"{ship.name}: {name} - {adef['reminder']}", "success")
         elif name == "Rally":
             self.log(f"{ship.name} rallies the crew.", "success")
         elif name == "Cloak":
@@ -3749,6 +4219,10 @@ class CombatHelperApp:
             ship.secondary_reactors_used = False
         self.log("--- NEW SCENE --- once-per-scene talents (Secondary Reactors) are available "
                  "again.", "separator")
+        if self.scene_traits and self.ask_yes_no(
+                "New Scene", f"Clear the {len(self.scene_traits)} scene trait(s) as well?"):
+            self.scene_traits = []
+            self.log("Scene traits cleared.")
         self.changed()
 
     def new_adventure(self):
@@ -3761,6 +4235,78 @@ class CombatHelperApp:
             ship.secondary_reactors_used = False
         self.log("--- NEW ADVENTURE --- Crew Support refilled, small craft recovered.",
                  "separator")
+        self.changed()
+
+    def _start_override(self, ship):
+        stations = [st for st in BRIDGE_STATIONS if st != STANDARD_STATION]
+        choice = self.ask_choice("Override", f"{ship.name}: which station do you control from "
+                                             "your current console?", stations, stations[0])
+        if not choice:
+            return
+        self.override_var.set(True)
+        self.station_var.set(choice)
+        self.on_station_change()
+        self.log(f"{ship.name}: Override - pick the {choice} action to perform; it is +1 "
+                 "Difficulty (Override box ticked).")
+
+    def _mark_restored(self, ship, sysname, why=""):
+        if sysname not in ship.restored_systems:
+            ship.restored_systems.append(sysname)
+        self.log(f"{ship.name}: Restore (Minor Action){why} - the Malfunctioning {sysname} can be "
+                 "used this turn.", "success")
+
+    def _restore(self, ship):
+        candidates = [s_ for s_ in SYSTEMS if ship.needs_restore(s_)]
+        if not candidates:
+            self.log(f"{ship.name}: Restore - no Malfunctioning subsystem needs it this turn.")
+            return
+        sysname = candidates[0] if len(candidates) == 1 else self.ask_choice(
+            "Restore", "Restore which Malfunctioning subsystem?", candidates, candidates[0])
+        if sysname:
+            self._mark_restored(ship, sysname)
+
+    def _create_trait_effect(self, ship):
+        options = ["Create a new trait"]
+        if self.scene_traits:
+            options += ["Alter an existing trait", "Remove a trait"]
+        choice = self.ask_choice("Create / Alter Trait", f"{ship.name} succeeds. What happens to "
+                                                         "the scene's traits?", options,
+                                 options[0])
+        if not choice:
+            self.log(f"{ship.name}: trait change cancelled.")
+            return
+        if choice.startswith("Create"):
+            text = (self.ask_string("New trait", "Name the new trait:", "") or "").strip()
+            if text:
+                self.scene_traits.append(f"{text} [{ship.name}]")
+                self.log(f"{ship.name} creates the trait '{text}'.", "success")
+            return
+        old = self.ask_choice("Scene traits", "Which trait?", self.scene_traits,
+                              self.scene_traits[0])
+        if not old:
+            return
+        if choice.startswith("Alter"):
+            text = (self.ask_string("Alter trait", "New wording:", old) or "").strip()
+            if text:
+                self.scene_traits[self.scene_traits.index(old)] = text
+                self.log(f"{ship.name} alters the trait '{old}' -> '{text}'.", "success")
+        else:
+            self.scene_traits.remove(old)
+            self.log(f"{ship.name} removes the trait '{old}'.", "success")
+
+    def add_scene_trait(self):
+        text = (self.ask_string("Scene trait", "New scene trait:", "") or "").strip()
+        if text:
+            self.scene_traits.append(text)
+            self.log(f"GM adds scene trait '{text}'.")
+            self.changed()
+
+    def remove_scene_trait(self):
+        sel = self.trait_lb.curselection()
+        if not sel or sel[0] >= len(self.scene_traits):
+            return
+        removed = self.scene_traits.pop(sel[0])
+        self.log(f"Scene trait removed: '{removed}'.")
         self.changed()
 
     def _prepare(self, ship):
@@ -3813,10 +4359,15 @@ class CombatHelperApp:
 
     def _patch_breach(self, ship, sysname, source):
         ship.breaches[sysname] = max(0, ship.breaches.get(sysname, 0) - 1)
-        if ship.breaches[sysname] == 0 and sysname in ship.devastating_systems:
-            ship.devastating_systems.remove(sysname)
+        cleared = ""
+        if ship.breaches[sysname] == 0:
+            if sysname in ship.devastating_systems:
+                ship.devastating_systems.remove(sysname)
+            if ship.breach_conditions.get(sysname):
+                cleared = f" - {ship.breach_conditions[sysname]} condition cleared"
+            ship.breach_conditions[sysname] = ""
         self.log(f"{ship.name}: {source} patches 1 breach on {sysname} "
-                 f"({ship.breaches[sysname]} left).", "success")
+                 f"({ship.breaches[sysname]} left){cleared}.", "success")
 
     def _resolve_attack(self, ship, name, target, weapon, hit):
         calib = 1 if name == "Fire" and ship.calibrated_weapons else 0
@@ -4048,6 +4599,64 @@ class CombatHelperApp:
                  + (" [High Yield]" if count > 1 else "")
                  + (" [Devastating]" if devastating else "")
                  + f". {sysname} breaches: {target.breaches[sysname]}.", "alert")
+        self.resolve_breach_nature(target, sysname, reason)
+
+    def resolve_breach_nature(self, ship, sysname, reason):
+        """Ask the GM for the Nature of Breach and attach it to the system."""
+        self.refresh_all()
+        result = self.ask_breach_nature(ship, sysname, reason)
+        if not result:
+            self.log(f"Nature of Breach on {ship.name} {sysname} not set (GM skipped)."
+                     + (f" It stays {ship.breach_condition(sysname)}."
+                        if ship.breach_condition(sysname) else ""))
+            return
+        nature, roll = result
+        how = f"rolled {roll}" if roll else "chosen"
+        final = ship.set_breach_condition(sysname, nature)
+        if final != nature:
+            self.log(f"Nature of Breach ({how}): {nature} - {ship.name} {sysname} stays {final} "
+                     "(more severe).", "alert")
+        else:
+            self.log(f"Nature of Breach on {ship.name} {sysname} ({how}): {nature} - "
+                     f"{breach_nature_description(nature)}", "alert")
+        if nature == "Damaged":
+            self.log(f"GM: {ship.name} {sysname} is Damaged - consider spending Threat to cause "
+                     "a complication.", "pool")
+        self.changed()
+
+    def set_breach_condition_manual(self, sysname, nature):
+        t = self.target
+        if t is None:
+            return
+        if not t.breaches.get(sysname, 0):
+            if nature:
+                self.log(f"{t.name} {sysname} has no breach - add one before setting its "
+                         "condition.", "alert")
+            self.refresh_all()
+            return
+        if nature == t.breach_condition(sysname):
+            return
+        t.set_breach_condition(sysname, nature, force=True)
+        self.log(f"GM sets {t.name} {sysname} condition: {nature or 'none'}.", "alert")
+        self.changed()
+
+    def failing_to_offline(self, sysname):
+        """GM button: spend 1 Threat to push a Failing subsystem Offline."""
+        t = self.target
+        if t is None or t.breach_condition(sysname) != "Failing":
+            return
+        if self.threat < 1:
+            if not self.ask_yes_no("No Threat", "The Threat pool is empty. Set the system "
+                                                "Offline anyway (GM override)?"):
+                return
+            self.log("GM override: Failing -> Offline without Threat.", "alert")
+        else:
+            self.threat -= 1
+            self.log(f"GM spends 1 Threat -> {self.threat}.", "pool")
+        t.set_breach_condition(sysname, "Offline", force=True)
+        self.log(f"{t.name} {sysname} goes OFFLINE - tasks using it cannot be attempted.",
+                 "alert")
+        self.changed()
 
     def open_shaken_resolver(self, ship, reason):
         result = self.ask_shaken_result(ship, reason)
@@ -4115,10 +4724,14 @@ class CombatHelperApp:
         if new == t.breaches.get(sysname, 0):
             return
         t.breaches[sysname] = new
-        if new == 0 and sysname in t.devastating_systems:
-            t.devastating_systems.remove(sysname)
+        if new == 0:
+            if sysname in t.devastating_systems:
+                t.devastating_systems.remove(sysname)
+            t.breach_conditions[sysname] = ""
         self.log(f"GM {'adds' if delta > 0 else 'removes'} a breach: {t.name} {sysname} -> {new}.",
                  "alert" if delta > 0 else "info")
+        if delta > 0:
+            self.resolve_breach_nature(t, sysname, "added manually by the GM")
         self.changed()
 
     def toggle_target_shields(self):
@@ -4331,6 +4944,7 @@ class CombatHelperApp:
             "gm_modifier": int_var_value(self.gm_mod_var, 0),
             "system_hit_table": self.hit_table_var.get(),
             "attacker": self.attacker_var.get(), "target": self.target_var.get(),
+            "scene_traits": list(self.scene_traits),
             "ships": [s.to_dict() for s in self.ships],
         }
 
@@ -4366,6 +4980,9 @@ class CombatHelperApp:
             if not isinstance(table, str) or table not in SYSTEM_HIT_TABLES:
                 table = DEFAULT_HIT_TABLE
             attacker = meta.get("attacker", "")
+            traits = meta.get("scene_traits", [])
+            traits = [str(t) for t in traits if isinstance(t, (str, int, float))] \
+                if isinstance(traits, list) else []
             target = meta.get("target", "")
         except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
             if not quiet:
@@ -4386,6 +5003,7 @@ class CombatHelperApp:
         self.hit_table_var.set(table)
         self.attacker_var.set(attacker if isinstance(attacker, str) else "")
         self.target_var.set(target if isinstance(target, str) else "")
+        self.scene_traits = traits
         self.pending_attack = None
         self._last_attacker = None
         self.dirty = os.path.abspath(path) != os.path.abspath(self.data_file)
@@ -4413,6 +5031,7 @@ class CombatHelperApp:
     def _load_presets(self):
         self.ships = preset_ships()
         self.round, self.threat, self.momentum = 1, 0, 0
+        self.scene_traits = []
         self.attacker_var.set(self.ships[0].name)
         self.target_var.set(self.ships[1].name)
         self.pending_attack = None
@@ -4531,6 +5150,12 @@ class CombatHelperApp:
             for lo, hi, sysname in table:
                 txt.insert("end", f"  {lo}-{hi}: {sysname}\n" if lo != hi
                            else f"  {lo}: {sysname}\n")
+        txt.insert("end", "\nNature of Breach (d20)\n", "h")
+        for lo, hi, name, desc in BREACH_NATURE_TABLE:
+            txt.insert("end", f"  {lo}-{hi}: {name} - {desc}\n")
+        txt.insert("end", "  A system keeps its most severe condition; it clears when the "
+                          "system's last breach is patched. Restore (standard Minor Action) "
+                          "lets a Malfunctioning subsystem be used for the rest of the turn.\n")
         txt.insert("end", "\nBreach triggers\n", "h")
         txt.insert("end", "  Shields reduced to 0; any damaging hit while Shields are 0; "
                           "< 25% when already Shaken in the same attack. High Yield adds +1.\n")

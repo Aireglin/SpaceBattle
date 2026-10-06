@@ -481,5 +481,119 @@ class TalentTests(unittest.TestCase):
         self.assertEqual(ship.effective_resistance, ship.base_resistance + 2)
 
 
+class BreachNatureTests(unittest.TestCase):
+    def test_table_ranges(self):
+        expected = {1: "Damaged", 4: "Damaged", 5: "Malfunctioning", 8: "Malfunctioning",
+                    9: "Primary Offline", 12: "Primary Offline", 13: "Failing", 16: "Failing",
+                    17: "Offline", 20: "Offline"}
+        for roll, name in expected.items():
+            self.assertEqual(main.breach_nature_lookup(roll), name)
+        self.assertEqual(main.roll_breach_nature(FixedRng([14])), (14, "Failing"))
+
+    def test_most_severe_condition_wins(self):
+        s = Ship(name="B")
+        s.breaches["Engines"] = 2
+        self.assertEqual(s.set_breach_condition("Engines", "Failing"), "Failing")
+        self.assertEqual(s.set_breach_condition("Engines", "Damaged"), "Failing")
+        self.assertEqual(s.set_breach_condition("Engines", "Offline"), "Offline")
+        self.assertEqual(s.set_breach_condition("Engines", "Damaged", force=True), "Damaged")
+        self.assertEqual(s.breach_condition("Engines"), "Damaged")
+
+    def test_condition_needs_a_breach(self):
+        s = Ship(name="B")
+        s.breach_conditions["Sensors"] = "Failing"
+        self.assertEqual(s.breach_condition("Sensors"), "")
+        s.normalize()
+        self.assertEqual(s.breach_conditions["Sensors"], "")
+
+    def test_restore_tracking(self):
+        s = Ship(name="R")
+        s.breaches["Engines"] = 1
+        s.set_breach_condition("Engines", "Malfunctioning")
+        self.assertTrue(s.needs_restore("Engines"))
+        s.restored_systems.append("Engines")
+        self.assertFalse(s.needs_restore("Engines"))
+        s.reset_round()
+        self.assertTrue(s.needs_restore("Engines"))
+
+    def test_breach_difficulty(self):
+        s = Ship(name="D")
+        warp = action("Conn / Helm", "Warp")
+        self.assertEqual(compute_difficulty("Warp", warp, s)[0], 1)
+        s.breaches["Engines"] = 1
+        for cond, extra in (("Damaged", 0), ("Malfunctioning", 0), ("Primary Offline", 1),
+                            ("Failing", 1), ("Offline", 0)):
+            s.set_breach_condition("Engines", cond, force=True)
+            total, parts = compute_difficulty("Warp", warp, s, gm_modifier=1)
+            self.assertEqual(total, 1 + extra + 1, cond)
+        s.set_breach_condition("Engines", "Failing", force=True)
+        total, parts = compute_difficulty("Warp", warp, s, gm_modifier=1)
+        self.assertIn(("Failing breach: Engines", 1), parts)
+        self.assertEqual(main.format_difficulty_hint(total, parts),
+                         "Base 1 + 1 (Failing breach: Engines) + 1 (GM Modifier) = "
+                         "Total Difficulty 3")
+
+    def test_assist_system_breach_counts(self):
+        s = Ship(name="A")
+        scan = action("Sensor Operations", "Scan for Weakness")      # Sensors + Security
+        self.assertEqual(main.action_systems(scan), ["Sensors"])
+        create = action("Command", "Create Trait")
+        self.assertEqual(main.action_systems(create), ["Computers"])
+        s.breaches["Computers"] = 1
+        s.set_breach_condition("Computers", "Primary Offline")
+        self.assertEqual(compute_difficulty("Create Trait", create, s)[0], 3)
+
+    def test_override_and_other_task_base(self):
+        s = Ship(name="O")
+        fire = action("Tactical", "Fire")
+        self.assertEqual(compute_difficulty("Fire", fire, s, Weapon(), override=True)[0], 3)
+        other = action(main.STANDARD_STATION, "Other Tasks")
+        self.assertEqual(compute_difficulty("Other Tasks", other, s, custom_base=4)[0], 4)
+        self.assertEqual(compute_difficulty("Other Tasks", other, s, custom_base=0)[0], 0)
+
+    def test_persistence(self):
+        s = Ship(name="P")
+        s.breaches["Weapons"] = 1
+        s.set_breach_condition("Weapons", "Failing")
+        s.restored_systems = ["Weapons"]
+        clone = Ship.from_dict(s.to_dict())
+        self.assertEqual(clone.breach_condition("Weapons"), "Failing")
+        self.assertEqual(clone.restored_systems, ["Weapons"])
+        d = s.to_dict()
+        d["breach_conditions"] = {"Weapons": "Exploded", "Engines": 5}
+        self.assertEqual(Ship.from_dict(d).breach_conditions["Weapons"], "")
+
+
+class StationTests(unittest.TestCase):
+    def test_every_station_has_create_trait(self):
+        for station, actions in BRIDGE_STATIONS.items():
+            names = [n for n in actions if "Trait" in n]
+            self.assertTrue(names, station)
+            for n in names:
+                self.assertEqual(actions[n]["base"], 2)
+                self.assertEqual(actions[n]["kind"], "Major")
+
+    def test_standard_actions_station(self):
+        std = BRIDGE_STATIONS[main.STANDARD_STATION]
+        for n in ("Change Position", "Interact", "Prepare", "Restore"):
+            self.assertEqual(std[n]["kind"], "Minor", n)
+        for n in ("Create / Alter Trait", "Assist", "Override", "Pass", "Ready", "Other Tasks"):
+            self.assertEqual(std[n]["kind"], "Major", n)
+
+    def test_station_lists(self):
+        for station in ("Command", "Operations / Engineering", "Communications"):
+            for n in ("Prepare", "Restore", "Interact", "Change Position"):
+                self.assertIn(n, BRIDGE_STATIONS[station], (station, n))
+        comms = BRIDGE_STATIONS["Communications"]
+        self.assertEqual(comms["Send / Respond to Hail"]["kind"], "Free")
+        self.assertEqual(comms["Internal Comms"]["kind"], "Free")
+        self.assertIn("Damage Control", comms)
+        self.assertEqual(BRIDGE_STATIONS["Operations / Engineering"]["Transport"]["base"], 1)
+        self.assertEqual(comms["Transport"]["base"], 1)
+        for station, n in (("Conn / Helm", "Impulse"), ("Tactical", "Fire"),
+                           ("Sensor Operations", "Reveal"), ("Command", "Rally")):
+            self.assertIn(n, BRIDGE_STATIONS[station])
+
+
 if __name__ == "__main__":
     unittest.main()
