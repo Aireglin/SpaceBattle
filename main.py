@@ -34,8 +34,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 APP_NAME = "STA 2e Combat Helper"
-APP_VERSION = "1.0.0"
-SAVE_FORMAT_VERSION = 1
+APP_VERSION = "1.1.0"
+SAVE_FORMAT_VERSION = 2
 
 
 def app_dir() -> str:
@@ -97,6 +97,17 @@ SYSTEM_HIT_TABLE = [
     (11, 12, "Weapons"),
 ]
 SYSTEM_HIT_DIE = SYSTEM_HIT_TABLE[-1][1]
+# Alternative weighted d20 table (rulebook-style) - selectable in the System Hit Generator.
+SYSTEM_HIT_TABLE_D20 = [
+    (1, 1, "Communications"),
+    (2, 2, "Computers"),
+    (3, 6, "Engines"),
+    (7, 9, "Sensors"),
+    (10, 17, "Structure"),
+    (18, 20, "Weapons"),
+]
+SYSTEM_HIT_TABLES = {"d12 (even)": SYSTEM_HIT_TABLE, "d20 (weighted)": SYSTEM_HIT_TABLE_D20}
+DEFAULT_HIT_TABLE = "d12 (even)"
 
 # Weapon qualities: name -> (takes an X value, reminder text)
 WEAPON_QUALITIES = {
@@ -116,8 +127,9 @@ WEAPON_QUALITIES = {
     "Intense": (False, "Increasing damage costs only 1 Momentum per +1 (auto-applied)."),
     "Jamming": (False, "On a hit, the target has +1 Difficulty to Communications/Sensors "
                        "tasks until End Round (auto-applied)."),
-    "Persistent": (True, "On a hit, the target suffers X damage (ignoring Resistance) at "
-                         "every End Round until fixed with Damage Control (auto-applied)."),
+    "Persistent": (False, "On a hit the attacker may spend 1-3 Momentum: the target takes half "
+                          "the weapon's damage (rounded up, Resistance applies) at the end of "
+                          "each round for that many rounds (auto-applied)."),
     "Piercing": (False, "Ignores the target's Resistance (auto-applied)."),
     "Slowing": (False, "On a hit, the target cannot Keep the Initiative until End Round "
                        "(auto-flagged)."),
@@ -125,6 +137,67 @@ WEAPON_QUALITIES = {
     "Versatile": (True, "On a successful attack, gain X bonus Momentum (NPC: Threat) "
                         "(auto-applied)."),
 }
+
+# Starship talents and special rules: name -> (kind, reminder text).
+# Talents not in this catalogue can still be added to a ship as free text (reminder only).
+TALENT = "Talent"
+SPECIAL_RULE = "Special Rule"
+STARSHIP_TALENTS = {
+    "Ablative Armor": (TALENT, "+2 Resistance (auto-applied)."),
+    "Improved Hull Integrity": (TALENT, "+1 Resistance (auto-applied)."),
+    "Advanced Shields": (TALENT, "+5 maximum Shields (auto-applied)."),
+    "Cloaking Device": (TALENT, "Cloak toggle. While Cloaked the ship has the Cloaked trait, its "
+                                "Shields are 0 and cannot be raised, and it cannot attack until "
+                                "it decloaks (Minor Action). Enemies must Reveal it before "
+                                "targeting it."),
+    "Extensive Shuttlebays": (TALENT, "Small Craft Readiness = Scale - 1; can support Scale 2 "
+                                      "craft such as runabouts."),
+    "Rapid-Fire Torpedo Launcher": (TALENT, "Torpedo Salvo: +1 Damage (auto-applied) and Tactical "
+                                            "may re-roll 1d20 on the attack."),
+    "Fast Targeting Systems": (TALENT, "Targeting Solution grants BOTH the d20 re-roll AND the "
+                                       "choice of system hit."),
+    "Advanced Sensor Suites": (TALENT, "When the ship assists a Sensors task it rolls 2d20 instead "
+                                       "of 1d20 (not while Sensors has breaches)."),
+    "Point Defense System": (TALENT, "While active, torpedo attacks against this ship face Cover: "
+                                     "+1 Difficulty (auto-applied)."),
+    "Secondary Reactors": (TALENT, "Once per scene, when the ship uses Reroute Power, spend 2 "
+                                   "Momentum (Immediate) to restore its Reserve Power "
+                                   "(contextual button / prompt)."),
+    "Backup EPS Conduits": (TALENT, "Redundant power conduits: reminder during Reroute Power and "
+                                    "when the ship loses power (Losing Power!) - apply the "
+                                    "talent's text (GM ruling)."),
+    "Rugged Design": (TALENT, "Breach repairs: re-roll 1d20 on Damage Control (auto-roll "
+                              "re-rolls a failed die); on success you may spend 2 Momentum to "
+                              "patch a second breach (contextual prompt)."),
+    "Improved Damage Control": (TALENT, "Better damage-control teams: reminder during Damage "
+                                        "Control - apply the talent's text (GM ruling)."),
+    "Electronic Warfare Systems": (TALENT, "Built to intercept and jam signals: reminder for "
+                                           "Communications tasks (GM ruling)."),
+    "Reduced Sensor Silhouette": (TALENT, "Hard to detect: reminder on Reveal / Sensor Sweep / "
+                                          "Scan for Weakness against this ship (GM may add "
+                                          "Difficulty)."),
+    "Emergency Medical Hologram": (TALENT, "An EMH can treat casualties when medical staff are "
+                                           "unavailable (narrative reminder)."),
+    "Experimental Vessel": (SPECIAL_RULE, "Ship assist dice cause a complication on 18-20 "
+                                          "(auto-applied)."),
+    "Prototype": (SPECIAL_RULE, "Same as Experimental Vessel: ship assist dice cause a "
+                                "complication on 18-20 (auto-applied)."),
+    "Abundant Personnel": (SPECIAL_RULE, "Crew Support pool is doubled (auto-applied)."),
+    "Specialized Shuttlebay": (SPECIAL_RULE, "Shuttlebay configured for specialised craft "
+                                             "(narrative reminder)."),
+}
+TALENT_RESISTANCE_BONUS = {"Ablative Armor": 2, "Improved Hull Integrity": 1}
+TALENT_SHIELD_BONUS = {"Advanced Shields": 5}
+EXPERIMENTAL_RULES = ("Experimental Vessel", "Prototype")
+
+
+def talent_kind(name: str) -> str:
+    return STARSHIP_TALENTS.get(name, (TALENT, ""))[0]
+
+
+def talent_text(name: str) -> str:
+    return STARSHIP_TALENTS.get(name, (TALENT, "Custom talent - no automation; reminder only."))[1]
+
 
 BONUS_DAMAGE_COST = 2          # Momentum per +1 damage (1 with Intense/Depleting)
 DEVASTATING_ATTACK_COST = 2    # Momentum (1 with Spread)
@@ -149,7 +222,8 @@ BRIDGE_STATIONS = {
     "Command": {
         "Direct": _action(
             "Major", "Communications", roll=False, attr="Control", dept="Command",
-            task_label="Commander's assist die", reminder="Costs 1 Momentum (NPC: 1 Threat). Choose an ally: they immediately take "
+            task_label="Commander's assist die",
+            reminder="Costs 1 Momentum (NPC: 1 Threat). Choose an ally: they immediately take "
                      "a Major Action WITHOUT the usual +1 Difficulty penalty. The commander "
                      "assists that task using Control + Command."),
         "Rally": _action(
@@ -174,8 +248,8 @@ BRIDGE_STATIONS = {
             "Major", "Engines", attr="Control", dept="Conn", assist=("Engines", "Conn"),
             base=1,
             reminder="On success the helm assists ALL of this ship's attacks until its next "
-                     "turn (adds a Control + Conn assist die to Fire / Ram). Cleared at End "
-                     "Round."),
+                     "turn (adds a Control + Conn assist die to Fire / Ram), but attacks "
+                     "AGAINST this ship are -1 Difficulty (auto-applied). Cleared at End Round."),
         "Evasive Action": _action(
             "Major", "Structure", roll=False, attr="Daring", dept="Conn",
             assist=("Structure", "Conn"), task_label="Defence roll when attacked",
@@ -211,7 +285,8 @@ BRIDGE_STATIONS = {
         "Targeting Solution": _action(
             "Minor", "Weapons", roll=False,
             reminder="Target an enemy within Long range. The next attack may re-roll 1d20 "
-                     "OR choose which system is hit (pick the benefit when you Fire)."),
+                     "OR choose which system is hit (pick the benefit when you Fire). With Fast "
+                     "Targeting Systems it gets BOTH."),
         "Fire": _action(
             "Major", "Weapons", attr="Control", dept="Security", assist=("Weapons", "Security"),
             base=ENERGY_BASE_DIFFICULTY, attack=True, needs_target=True,
@@ -226,11 +301,22 @@ BRIDGE_STATIONS = {
         "Modulate Shields": _action(
             "Major", "Structure", roll=False,
             reminder="The ship's Resistance increases by +2 until End Round."),
+        "Cloak": _action(
+            "Major", "Engines", attr="Control", dept="Engineering",
+            assist=("Engines", "Security"), base=2, requires_power=True,
+            reminder="Cloaking Device talent only. Requires Reserve Power (consumed). Success: "
+                     "the ship gains the Cloaked trait - Shields drop to 0 and cannot be raised, "
+                     "it cannot attack, and enemies must Reveal it before targeting it."),
+        "Decloak": _action(
+            "Minor", "Engines", roll=False,
+            reminder="Drop the cloak (Minor Action - does not use a turn). Shields stay down "
+                     "until raised with Prepare."),
         "Tractor Beam": _action(
             "Major", "Structure", attr="Control", dept="Security",
             assist=("Structure", "Security"), base=2, needs_target=True,
             reminder="Target within Close range. On success the target is immobilised; the "
-                     "tractor beam has Strength = this ship's Scale - 1."),
+                     "tractor beam's Strength is the ship's Tractor Beam rating (default "
+                     "Scale - 1)."),
     },
     "Sensor Operations": {
         "Calibrate Sensors": _action(
@@ -258,8 +344,8 @@ BRIDGE_STATIONS = {
         "Damage Control": _action(
             "Major", "Structure", attr="Presence", dept="Engineering",
             assist=("Structure", "Engineering"), base=2,
-            reminder="Success: patch 1 breach (also extinguishes one Persistent effect). "
-                     "Breaches from Devastating weapons add +1 Difficulty."),
+            reminder="Success: patch 1 breach. Breaches from Devastating weapons add +1 "
+                     "Difficulty."),
         "Regenerate Shields": _action(
             "Major", "Structure", attr="Control", dept="Engineering",
             assist=("Structure", "Engineering"), base=2, requires_power=True,
@@ -281,6 +367,10 @@ BRIDGE_STATIONS = {
                      "(default 2 - use the GM Modifier). Shields usually must be lowered."),
     },
 }
+
+# Actions a cloaked ship cannot take, and actions that need a detectable target.
+HOSTILE_ACTIONS = ("Fire", "Ram", "Tractor Beam")
+TARGETED_ACTIONS = ("Fire", "Ram", "Tractor Beam", "Scan for Weakness", "Targeting Solution")
 
 GENERATOR_PROFILES = {
     # profile -> (system modifiers, department weights)
@@ -353,7 +443,8 @@ class Weapon:
             quals = {q: 0 for q in quals}
         if not isinstance(quals, dict):
             quals = {}
-        quals = {str(k): to_int(v, 0) for k, v in quals.items() if k in WEAPON_QUALITIES}
+        quals = {str(k): (to_int(v, 0) if WEAPON_QUALITIES[k][0] else 0)
+                 for k, v in quals.items() if k in WEAPON_QUALITIES}
         wtype = str(data.get("wtype", data.get("type", "Energy")))
         rng = str(data.get("range", "Medium"))
         return cls(
@@ -372,24 +463,32 @@ class Ship:
     side: str = "NPC"
     scale: int = 4
     crew_quality: str = DEFAULT_CREW_QUALITY
-    shields_max: int = 12
+    base_shields: int = 12          # before talents (Advanced Shields adds +5)
     shields: int = 12
-    resistance: int = 4
+    base_resistance: int = 4        # before talents (Ablative Armor +2, Improved Hull +1)
     systems: dict = field(default_factory=lambda: {s: 8 for s in SYSTEMS})
     departments: dict = field(default_factory=lambda: {d: 2 for d in DEPARTMENTS})
     weapons: list = field(default_factory=list)
+    talents: list = field(default_factory=list)     # talent / special rule names
+    tractor_beam: int = 0           # tractor beam Strength; 0 = default (Scale - 1)
     notes: str = ""
     # --- lasting combat state ---------------------------------------------
     reserve_power: bool = True
     shields_up: bool = True
+    stored_shields: int = -1        # Shields to restore when raised again (-1 = full)
     weapons_armed: bool = True
     warp_prepared: bool = False
+    cloaked: bool = False
+    point_defense_active: bool = True
+    crew_support_used: int = 0
+    small_craft_deployed: int = 0
+    secondary_reactors_used: bool = False   # once per scene
     breaches: dict = field(default_factory=lambda: {s: 0 for s in SYSTEMS})
     devastating_systems: list = field(default_factory=list)
     complications: list = field(default_factory=list)
-    persistent_effects: list = field(default_factory=list)   # [{"amount": int, "source": str}]
+    persistent_effects: list = field(default_factory=list)   # [{amount, rounds, source}]
     tractored_by: str = ""
-    tractor_strength: int = 0
+    tractor_strength: int = 0       # strength of a tractor beam holding THIS ship
     rerouted_power: str = ""
     # --- "next time" effects (consumed when used) -------------------------
     calibrated_weapons: bool = False
@@ -408,14 +507,60 @@ class Ship:
     jammed: bool = False
     slowed: bool = False
     shaken: bool = False
+    revealed: bool = False          # a cloaked ship detected with Reveal this round
+
+    # ----------------------------------------------------------------- talents
+    def has_talent(self, name: str) -> bool:
+        return name in self.talents
+
+    @property
+    def talent_resistance_bonus(self) -> int:
+        return sum(TALENT_RESISTANCE_BONUS.get(t, 0) for t in self.talents)
+
+    @property
+    def talent_shield_bonus(self) -> int:
+        return sum(TALENT_SHIELD_BONUS.get(t, 0) for t in self.talents)
+
+    @property
+    def max_shields(self) -> int:
+        return max(0, self.base_shields + self.talent_shield_bonus)
+
+    @property
+    def effective_resistance(self) -> int:
+        return max(0, self.base_resistance + self.talent_resistance_bonus + self.resistance_bonus)
+
+    @property
+    def tractor_strength_rating(self) -> int:
+        return self.tractor_beam if self.tractor_beam > 0 else max(0, self.scale - 1)
+
+    @property
+    def crew_support_max(self) -> int:
+        base = self.scale
+        return base * 2 if self.has_talent("Abundant Personnel") else base
+
+    @property
+    def small_craft_readiness(self) -> int:
+        return max(0, self.scale - 1) if self.has_talent("Extensive Shuttlebays") else 0
+
+    @property
+    def max_small_craft_scale(self) -> int:
+        return 2 if self.has_talent("Extensive Shuttlebays") else 1
+
+    @property
+    def assist_complication_from(self) -> int:
+        """Lowest d20 result that is a complication on this ship's assist dice."""
+        return 18 if any(self.has_talent(t) for t in EXPERIMENTAL_RULES) else 20
+
+    def ship_assist_dice(self, system: str) -> int:
+        """Advanced Sensor Suites: 2 assist dice on Sensors tasks unless Sensors is breached."""
+        if (system == "Sensors" and self.has_talent("Advanced Sensor Suites")
+                and self.breaches.get("Sensors", 0) == 0):
+            return 2
+        return 1
 
     # ----------------------------------------------------------------- derived
     def crew_ratings(self) -> tuple:
         return CREW_QUALITY.get(self.crew_quality, CREW_QUALITY[DEFAULT_CREW_QUALITY])
-
-    @property
-    def effective_resistance(self) -> int:
-        return max(0, self.resistance + self.resistance_bonus)
 
     def total_breaches(self) -> int:
         return sum(self.breaches.values())
@@ -423,7 +568,51 @@ class Ship:
     def weapon(self, name: str):
         return next((w for w in self.weapons if w.name == name), None)
 
+    def resistance_text(self) -> str:
+        parts = [f"{self.base_resistance} base"]
+        for t in self.talents:
+            if TALENT_RESISTANCE_BONUS.get(t):
+                parts.append(f"+{TALENT_RESISTANCE_BONUS[t]} {t}")
+        if self.resistance_bonus:
+            parts.append(f"{self.resistance_bonus:+d} Modulated")
+        if len(parts) == 1:
+            return str(self.effective_resistance)
+        return f"{self.effective_resistance} ({' '.join(parts)})"
+
     # ----------------------------------------------------------------- state
+    def clamp_shields(self) -> None:
+        self.shields = clamp(self.shields, 0, self.max_shields)
+        if self.stored_shields >= 0:
+            self.stored_shields = clamp(self.stored_shields, 0, self.max_shields)
+
+    def lower_shields(self) -> None:
+        """Lowered shields count as 0; the current value is kept for when they are raised."""
+        if self.shields_up:
+            self.stored_shields = self.shields
+            self.shields = 0
+            self.shields_up = False
+
+    def raise_shields(self) -> bool:
+        """Returns False if the shields cannot be raised (e.g. while cloaked)."""
+        if self.cloaked:
+            return False
+        if not self.shields_up:
+            restore = self.stored_shields if self.stored_shields >= 0 else self.max_shields
+            self.shields = clamp(restore, 0, self.max_shields)
+            self.stored_shields = -1
+            self.shields_up = True
+        return True
+
+    def engage_cloak(self) -> None:
+        self.lower_shields()
+        self.cloaked = True
+        self.revealed = False
+
+    def disengage_cloak(self) -> None:
+        """Decloaking leaves the shields down until the ship raises them (Prepare)."""
+        self.cloaked = False
+        self.revealed = False
+
     def reset_round(self) -> None:
         """Clear everything that only lasts until the end of the round."""
         self.turns_used = 0
@@ -435,6 +624,7 @@ class Ship:
         self.jammed = False
         self.slowed = False
         self.shaken = False
+        self.revealed = False
 
     def clear_temporary_effects(self) -> None:
         self.reset_round()
@@ -452,16 +642,23 @@ class Ship:
 
     def full_repair(self) -> None:
         self.clear_temporary_effects()
-        self.shields = self.shields_max
+        self.cloaked = False
+        self.shields_up = True
+        self.stored_shields = -1
+        self.shields = self.max_shields
         self.breaches = {s: 0 for s in SYSTEMS}
         self.devastating_systems = []
         self.complications = []
         self.reserve_power = True
-        self.shields_up = True
         self.weapons_armed = True
 
     def active_effects(self) -> list:
         fx = []
+        if self.cloaked:
+            fx.append("CLOAKED" + (" (revealed)" if self.revealed else ""))
+        if not self.shields_up:
+            stored = self.stored_shields if self.stored_shields >= 0 else self.max_shields
+            fx.append(f"Shields lowered ({stored} when raised)")
         if self.shaken:
             fx.append("Shaken (this round)")
         if self.brace_for_impact:
@@ -496,7 +693,8 @@ class Ship:
         if self.warp_prepared:
             fx.append("Prepared for Warp")
         for eff in self.persistent_effects:
-            fx.append(f"Persistent {eff.get('amount', 1)} ({eff.get('source', '?')})")
+            fx.append(f"Persistent {eff.get('amount', 1)} dmg x{eff.get('rounds', 1)} round(s) "
+                      f"({eff.get('source', '?')})")
         return fx
 
     # ------------------------------------------------------------ persistence
@@ -509,6 +707,12 @@ class Ship:
     def from_dict(cls, data: dict) -> "Ship":
         if not isinstance(data, dict) or not str(data.get("name", "")).strip():
             raise ValueError("ship entry has no name")
+        data = dict(data)
+        # v1 saves stored the totals as "shields_max" / "resistance".
+        if "base_shields" not in data and "shields_max" in data:
+            data["base_shields"] = data["shields_max"]
+        if "base_resistance" not in data and "resistance" in data:
+            data["base_resistance"] = data["resistance"]
         ship = cls(name=str(data["name"]).strip())
         for f in fields(cls):
             if f.name in ("name", "weapons") or f.name not in data:
@@ -539,15 +743,29 @@ class Ship:
         if ship.side not in SIDES:
             ship.side = "NPC"
         ship.scale = clamp(ship.scale, 1, 10)
-        ship.shields_max = max(0, ship.shields_max)
-        ship.shields = clamp(ship.shields, 0, ship.shields_max)
-        ship.resistance = max(0, ship.resistance)
+        talents = []
+        for t in ship.talents:
+            t = str(t).strip()
+            if t and t not in talents:
+                talents.append(t)
+        ship.talents = talents
+        ship.base_shields = max(0, ship.base_shields)
+        ship.base_resistance = max(0, ship.base_resistance)
+        ship.tractor_beam = max(0, ship.tractor_beam)
+        ship.stored_shields = max(-1, ship.stored_shields)
+        ship.crew_support_used = max(0, ship.crew_support_used)
+        ship.small_craft_deployed = max(0, ship.small_craft_deployed)
+        if ship.cloaked and not ship.has_talent("Cloaking Device"):
+            ship.cloaked = False
+        ship.clamp_shields()
         ship.breaches = {s: max(0, v) for s, v in ship.breaches.items()}
         ship.devastating_systems = [s for s in ship.devastating_systems if s in SYSTEMS]
         ship.systems_used = [s for s in ship.systems_used if s in SYSTEMS]
         ship.complications = [str(c) for c in ship.complications]
         ship.persistent_effects = [
-            {"amount": max(1, to_int(e.get("amount", 1), 1)), "source": str(e.get("source", "?"))}
+            {"amount": max(1, to_int(e.get("amount", 1), 1)),
+             "rounds": max(1, to_int(e.get("rounds", 1), 1)),
+             "source": str(e.get("source", "?")), "piercing": bool(e.get("piercing", False))}
             for e in ship.persistent_effects if isinstance(e, dict)]
         if ship.weakness_scanned not in ("", "damage", "piercing"):
             ship.weakness_scanned = ""
@@ -559,36 +777,44 @@ class Ship:
 def preset_ships() -> list:
     aurora = Ship(
         name="USS Aurora", ship_class="Akira-class Prototype", side="Player", scale=5,
-        crew_quality="Talented", shields_max=19, shields=19, resistance=7,
+        crew_quality="Talented", base_shields=19, shields=19, base_resistance=5,
         systems={"Communications": 9, "Computers": 10, "Engines": 10, "Sensors": 11,
                  "Structure": 9, "Weapons": 11},
         departments={"Command": 1, "Conn": 2, "Engineering": 3, "Security": 4,
                      "Medicine": 3, "Science": 3},
         weapons=[
-            Weapon("Phaser Arrays", "Energy", 6, "Medium", {"Versatile": 2}),
-            Weapon("Photon Torpedoes", "Torpedo", 6, "Long", {"High Yield": 0}),
-            Weapon("Quantum Torpedoes", "Torpedo", 7, "Long", {"High Yield": 0, "Intense": 0}),
+            Weapon("Phaser Arrays", "Energy", 8, "Medium",
+                   {"Versatile": 2, "Area": 0, "Spread": 0}),
+            Weapon("Photon Torpedoes", "Torpedo", 7, "Long", {"High Yield": 0}),
         ],
-        notes="Ablative Armor: +2 Resistance (included in Resistance 7). "
-              "Weapon profiles are editable samples.")
+        talents=["Ablative Armor", "Extensive Shuttlebays", "Rapid-Fire Torpedo Launcher",
+                 "Advanced Sensor Suites", "Emergency Medical Hologram",
+                 "Experimental Vessel", "Specialized Shuttlebay"],
+        tractor_beam=4,
+        notes="Resistance 7 = base 5 + 2 Ablative Armor.")
     warbird = Ship(
         name="D'Deridex Warbird", ship_class="D'Deridex-class Warbird", side="NPC", scale=6,
-        crew_quality="Talented", shields_max=21, shields=21, resistance=6,
+        crew_quality="Talented", base_shields=21, shields=21, base_resistance=6,
         systems={"Communications": 9, "Computers": 10, "Engines": 10, "Sensors": 11,
                  "Structure": 11, "Weapons": 9},
         departments={"Command": 3, "Conn": 2, "Engineering": 2, "Security": 4,
                      "Medicine": 1, "Science": 3},
         weapons=[
-            Weapon("Disruptor Banks", "Energy", 6, "Medium", {"Versatile": 2}),
-            Weapon("Plasma Torpedoes", "Torpedo", 7, "Long", {"Persistent": 2, "Cumbersome": 0}),
+            Weapon("Disruptor Banks", "Energy", 9, "Medium", {"Intense": 0}),
+            Weapon("Plasma Torpedoes", "Torpedo", 7, "Long",
+                   {"Persistent": 0, "Calibration": 0, "Cumbersome": 0}),
         ],
-        notes="Romulan Star Empire. Cloaking Device. Weapon profiles are editable samples.")
+        talents=["Cloaking Device", "Electronic Warfare Systems", "Fast Targeting Systems",
+                 "Improved Damage Control", "Reduced Sensor Silhouette", "Secondary Reactors",
+                 "Abundant Personnel"],
+        tractor_beam=5,
+        notes="Romulan Star Empire.")
     return [aurora, warbird]
 
 
 def generate_npc_ship(name: str, scale: int, crew_quality: str, profile: str = "Balanced",
-                      rng=random) -> Ship:
-    """Build a plausible NPC vessel of the given Scale, Crew Quality and role."""
+                      rng=random, talents=None) -> Ship:
+    """Build a plausible NPC vessel of the given Scale, Crew Quality, role and talents."""
     scale = clamp(to_int(scale, 4), 1, 7)
     sys_mods, dept_bias = GENERATOR_PROFILES.get(profile, GENERATOR_PROFILES["Balanced"])
     base = 7 + (scale + 1) // 2
@@ -607,12 +833,14 @@ def generate_npc_ship(name: str, scale: int, crew_quality: str, profile: str = "
                       {"Versatile": 1} if scale >= 4 and not civilian else {})]
     if not civilian and scale >= 3:
         weapons.append(Weapon("Torpedo Launchers", "Torpedo", scale + 1, "Long", {"High Yield": 0}))
-    return Ship(
+    ship = Ship(
         name=name, ship_class=f"Generated {profile} (Scale {scale})", side="NPC", scale=scale,
         crew_quality=crew_quality if crew_quality in CREW_QUALITY else DEFAULT_CREW_QUALITY,
-        shields_max=shields, shields=shields, resistance=resistance, systems=systems,
-        departments=departments, weapons=weapons,
+        base_shields=shields, shields=shields, base_resistance=resistance, systems=systems,
+        departments=departments, weapons=weapons, talents=list(dict.fromkeys(talents or [])),
         notes=f"Generated by NPC Generator ({profile}).")
+    ship.shields = ship.max_shields
+    return ship
 
 
 def parse_roster_data(data) -> tuple:
@@ -623,7 +851,7 @@ def parse_roster_data(data) -> tuple:
     if isinstance(data, dict) and "ships" in data:
         entries = data.get("ships") or []
         meta = {k: data[k] for k in ("round", "threat", "momentum", "gm_modifier",
-                                     "attacker", "target") if k in data}
+                                     "attacker", "target", "system_hit_table") if k in data}
     elif isinstance(data, list):
         entries = data
     elif isinstance(data, dict) and "name" in data:
@@ -650,6 +878,7 @@ class Die:
     crit: int
     source: str = "crew"        # crew | ship | assist
     rerolled_from: int = 0
+    comp_from: int = 20         # rolls >= this are complications (Experimental Vessel: 18)
 
     @property
     def successes(self) -> int:
@@ -659,7 +888,7 @@ class Die:
 
     @property
     def complication(self) -> bool:
-        return self.roll == 20
+        return self.roll >= self.comp_from
 
     def label(self) -> str:
         prefix = f"({self.rerolled_from}->)" if self.rerolled_from else ""
@@ -678,13 +907,15 @@ class TaskOutcome:
     dice: list = field(default_factory=list)
 
 
-def make_die(target: int, crit: int, source: str = "crew", rng=random) -> Die:
-    return Die(rng.randint(1, 20), target, max(1, crit), source)
+def make_die(target: int, crit: int, source: str = "crew", rng=random, comp_from: int = 20) -> Die:
+    return Die(rng.randint(1, 20), target, max(1, crit), source, comp_from=comp_from)
 
 
 def reroll_worst(dice: list, rng=random):
-    """Re-roll the worst (highest) crew die. Returns (old, new) or None."""
-    crew = [d for d in dice if d.source == "crew"]
+    """Re-roll the worst crew die if it failed or is a complication.
+
+    Returns (old, new), or None when no crew die needs re-rolling."""
+    crew = [d for d in dice if d.source == "crew" and (d.successes == 0 or d.complication)]
     if not crew:
         return None
     worst = max(crew, key=lambda d: d.roll)
@@ -697,14 +928,15 @@ def reroll_worst(dice: list, rng=random):
 def outcome_from_successes(total: int, difficulty: int, opposition=None, complications: int = 0,
                            dice=None, assist_ignored: bool = False) -> TaskOutcome:
     success = total >= difficulty
-    bar = difficulty
-    if opposition is not None:
-        # Opposed task: must also beat the defender (ties favour the defender).
-        success = success and total > opposition
-        bar = max(difficulty, opposition)
-    excess = max(0, total - bar) if success else 0
+    excess = max(0, total - difficulty) if success else 0
     return TaskOutcome(total, difficulty, success, excess, complications, opposition,
                        assist_ignored, list(dice or []))
+
+
+def opposed_difficulty(parts, defender_successes: int) -> int:
+    """2e opposed task: the defender rolls first and their successes replace the base
+    Difficulty; every other modifier (Cumbersome, GM, ...) still applies."""
+    return max(0, defender_successes + sum(v for _label, v in parts[1:]))
 
 
 def evaluate_task(dice: list, difficulty: int, opposition=None) -> TaskOutcome:
@@ -767,16 +999,17 @@ def roll_minor_damage(rng=random) -> tuple:
     return rolls, MINOR_DAMAGE_TABLE[0][2]
 
 
-def system_hit_lookup(roll: int) -> str:
-    for low, high, system in SYSTEM_HIT_TABLE:
+def system_hit_lookup(roll: int, table=None) -> str:
+    for low, high, system in table or SYSTEM_HIT_TABLE:
         if low <= roll <= high:
             return system
     raise ValueError(f"roll {roll} outside system hit table")
 
 
-def roll_system_hit(rng=random) -> tuple:
-    roll = rng.randint(1, SYSTEM_HIT_DIE)
-    return roll, system_hit_lookup(roll)
+def roll_system_hit(rng=random, table=None) -> tuple:
+    table = table or SYSTEM_HIT_TABLE
+    roll = rng.randint(1, table[-1][1])
+    return roll, system_hit_lookup(roll, table)
 
 
 @dataclass
@@ -825,6 +1058,14 @@ def resolve_shield_damage(shields: int, shields_max: int, raw_damage: int, resis
     return out
 
 
+def pending_damage_bonus(pending) -> int:
+    """Automatic extra damage carried by a pending hit (calibration, weakness, rapid-fire)."""
+    if not pending:
+        return 0
+    return (pending.get("calibrate", 0) + pending.get("scan_damage", 0)
+            + pending.get("rapid_fire", 0))
+
+
 def range_penalty(range_band: str) -> int:
     if range_band not in RANGES:
         return 0
@@ -832,8 +1073,8 @@ def range_penalty(range_band: str) -> int:
 
 
 def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
-                       range_band: str = "Close", gm_modifier: int = 0):
-    """Total Difficulty = Base + Weapon modifiers + context penalties + GM Modifier.
+                       range_band: str = "Close", gm_modifier: int = 0, target=None):
+    """Total Difficulty = Base + Weapon modifiers + context (talents, range...) + GM Modifier.
 
     Returns (total, [(label, value), ...]) or (None, []) for actions without a roll."""
     if not adef or not adef["roll"]:
@@ -867,6 +1108,14 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
             parts.append(("Jammed", 1))
         if action_name == "Damage Control" and ship.devastating_systems:
             parts.append(("Devastating breaches", 1))
+    if target is not None and target is not ship:
+        if target.cloaked and action_name in TARGETED_ACTIONS:
+            parts.append(("Target Cloaked", 1))
+        if adef["attack"] and target.attack_pattern:
+            parts.append(("Target's Attack Pattern", -1))
+        if (action_name == "Fire" and weapon is not None and weapon.wtype == "Torpedo"
+                and target.has_talent("Point Defense System") and target.point_defense_active):
+            parts.append(("Point Defense (Cover)", 1))
     parts.append(("GM Modifier", gm_modifier))
     total = max(0, sum(v for _label, v in parts))
     return total, parts
@@ -1147,8 +1396,76 @@ class WeaponDialog(tk.Toplevel):
         return dlg.result
 
 
+class TalentPicker(ttk.Frame):
+    """Multi-select list of starship talents / special rules, plus custom entries."""
+
+    def __init__(self, master, selected=(), height=8, on_change=None, allow_custom=True):
+        super().__init__(master)
+        self.on_change = on_change
+        self.names = list(STARSHIP_TALENTS)
+        self.names += [t for t in selected if t not in self.names]
+        lf = ttk.Frame(self)
+        lf.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.lb = tk.Listbox(lf, selectmode="multiple", exportselection=False, height=height,
+                             width=34, activestyle="none")
+        sb = ttk.Scrollbar(lf, orient="vertical", command=self.lb.yview)
+        self.lb.configure(yscrollcommand=sb.set)
+        self.lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for name in self.names:
+            self.lb.insert("end", self._label(name))
+        for name in selected:
+            self.lb.selection_set(self.names.index(name))
+        self.lb.bind("<<ListboxSelect>>", self._changed)
+        self.info = ttk.Label(self, text="Click a talent to see its rule.", wraplength=260,
+                              justify="left", style="Info.TLabel")
+        self.info.grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        if allow_custom:
+            self.custom_var = tk.StringVar()
+            ttk.Entry(self, textvariable=self.custom_var, width=22).grid(row=2, column=0,
+                                                                         sticky="ew", pady=(3, 0))
+            ttk.Button(self, text="Add custom", command=self._add_custom).grid(
+                row=2, column=1, sticky="w", padx=(3, 0), pady=(3, 0))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+    @staticmethod
+    def _label(name):
+        if name not in STARSHIP_TALENTS:
+            return f"{name}  (custom)"
+        return name + ("  (Special Rule)" if talent_kind(name) == SPECIAL_RULE else "")
+
+    def _changed(self, _event=None):
+        sel = self.lb.curselection()
+        active = self.lb.index("active")
+        name = self.names[active] if 0 <= active < len(self.names) else None
+        if name:
+            self.info.configure(text=f"{name}: {talent_text(name)}")
+        if self.on_change:
+            self.on_change()
+        return sel
+
+    def _add_custom(self):
+        name = self.custom_var.get().strip()
+        if not name:
+            return
+        if name not in self.names:
+            self.names.append(name)
+            self.lb.insert("end", self._label(name))
+        self.lb.selection_set(self.names.index(name))
+        self.custom_var.set("")
+        self._changed()
+
+    def selected(self) -> list:
+        return [self.names[i] for i in self.lb.curselection()]
+
+    def clear(self):
+        self.lb.selection_clear(0, "end")
+        self._changed()
+
+
 class ShipEditor(tk.Toplevel):
-    """Custom Ship creator / editor (systems, departments, weapons, crew quality)."""
+    """Custom Ship creator / editor (systems, departments, weapons, talents, crew quality)."""
 
     def __init__(self, parent, ship, existing_names, title):
         super().__init__(parent)
@@ -1162,18 +1479,19 @@ class ShipEditor(tk.Toplevel):
 
         frm = ttk.Frame(self, padding=10)
         frm.pack(fill="both", expand=True)
-        frm.columnconfigure(0, weight=1)
-        frm.columnconfigure(1, weight=1)
+        for col in range(3):
+            frm.columnconfigure(col, weight=1)
 
         gen = ttk.LabelFrame(frm, text="General", padding=6)
-        gen.grid(row=0, column=0, columnspan=2, sticky="ew")
+        gen.grid(row=0, column=0, columnspan=3, sticky="ew")
         self.name_var = tk.StringVar(value=s.name)
         self.class_var = tk.StringVar(value=s.ship_class)
         self.side_var = tk.StringVar(value=s.side)
         self.scale_var = tk.IntVar(value=s.scale)
         self.quality_var = tk.StringVar(value=s.crew_quality)
-        self.shields_var = tk.IntVar(value=s.shields_max)
-        self.res_var = tk.IntVar(value=s.resistance)
+        self.shields_var = tk.IntVar(value=s.base_shields)
+        self.res_var = tk.IntVar(value=s.base_resistance)
+        self.tractor_var = tk.IntVar(value=s.tractor_beam)
         ttk.Label(gen, text="Name").grid(row=0, column=0, sticky="w")
         ttk.Entry(gen, textvariable=self.name_var, width=30).grid(row=0, column=1, columnspan=3,
                                                                   sticky="ew", pady=2)
@@ -1191,19 +1509,26 @@ class ShipEditor(tk.Toplevel):
                            state="readonly", width=12)
         qcb.grid(row=3, column=1, sticky="w", pady=2)
         self.quality_info = ttk.Label(gen, text="")
-        self.quality_info.grid(row=3, column=2, columnspan=2, sticky="w", padx=(8, 0))
+        self.quality_info.grid(row=3, column=2, columnspan=3, sticky="w", padx=(8, 0))
         qcb.bind("<<ComboboxSelected>>", lambda _e: self._update_quality_info())
-        ttk.Label(gen, text="Shields (max)").grid(row=4, column=0, sticky="w")
+        ttk.Label(gen, text="Shields (base)").grid(row=4, column=0, sticky="w")
         ttk.Spinbox(gen, from_=0, to=60, textvariable=self.shields_var, width=5).grid(
             row=4, column=1, sticky="w")
-        ttk.Label(gen, text="Resistance").grid(row=4, column=2, sticky="e", padx=(8, 2))
+        ttk.Label(gen, text="Resistance (base)").grid(row=4, column=2, sticky="e", padx=(8, 2))
         ttk.Spinbox(gen, from_=0, to=20, textvariable=self.res_var, width=5).grid(
             row=4, column=3, sticky="w")
-        ttk.Button(gen, text="Auto-calc (Shields = Structure + Security + Scale, "
+        self.effective_lbl = ttk.Label(gen, text="", style="Bold.TLabel")
+        self.effective_lbl.grid(row=4, column=4, sticky="w", padx=(10, 0))
+        ttk.Label(gen, text="Tractor Beam Strength").grid(row=5, column=0, sticky="w")
+        ttk.Spinbox(gen, from_=0, to=15, textvariable=self.tractor_var, width=5).grid(
+            row=5, column=1, sticky="w", pady=2)
+        ttk.Label(gen, text="(0 = Scale - 1)", style="Info.TLabel").grid(row=5, column=2,
+                                                                         columnspan=2, sticky="w")
+        ttk.Button(gen, text="Auto-calc base (Shields = Structure + Security + Scale, "
                              "Resistance = Scale)",
-                   command=self._auto_calc).grid(row=5, column=0, columnspan=4, sticky="w",
+                   command=self._auto_calc).grid(row=6, column=0, columnspan=5, sticky="w",
                                                  pady=(4, 0))
-        gen.columnconfigure(1, weight=1)
+        gen.columnconfigure(4, weight=1)
 
         sysf = ttk.LabelFrame(frm, text="Systems", padding=6)
         sysf.grid(row=1, column=0, sticky="nsew", pady=6, padx=(0, 3))
@@ -1214,21 +1539,27 @@ class ShipEditor(tk.Toplevel):
             ttk.Spinbox(sysf, from_=1, to=16, textvariable=self.sys_vars[name], width=5).grid(
                 row=i, column=1, sticky="w", pady=1)
         deptf = ttk.LabelFrame(frm, text="Departments", padding=6)
-        deptf.grid(row=1, column=1, sticky="nsew", pady=6, padx=(3, 0))
+        deptf.grid(row=1, column=1, sticky="nsew", pady=6, padx=3)
         self.dept_vars = {}
         for i, name in enumerate(DEPARTMENTS):
             self.dept_vars[name] = tk.IntVar(value=s.departments.get(name, 2))
             ttk.Label(deptf, text=name).grid(row=i, column=0, sticky="w")
             ttk.Spinbox(deptf, from_=0, to=5, textvariable=self.dept_vars[name], width=5).grid(
                 row=i, column=1, sticky="w", pady=1)
+        tf = ttk.LabelFrame(frm, text="Starship Talents & Special Rules (multi-select)",
+                            padding=6)
+        tf.grid(row=1, column=2, rowspan=2, sticky="nsew", pady=6, padx=(3, 0))
+        self.talents = TalentPicker(tf, selected=s.talents, height=12,
+                                    on_change=self._update_effective)
+        self.talents.pack(fill="both", expand=True)
 
         wf = ttk.LabelFrame(frm, text="Weapons", padding=6)
         wf.grid(row=2, column=0, columnspan=2, sticky="nsew")
         cols = ("type", "damage", "range", "qualities")
         self.tree = ttk.Treeview(wf, columns=cols, height=5, selectmode="browse")
         self.tree.heading("#0", text="Name")
-        self.tree.column("#0", width=150)
-        for c, w in zip(cols, (70, 70, 70, 200)):
+        self.tree.column("#0", width=140)
+        for c, w in zip(cols, (65, 65, 65, 170)):
             self.tree.heading(c, text=c.title())
             self.tree.column(c, width=w, anchor="w")
         self.tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
@@ -1240,21 +1571,42 @@ class ShipEditor(tk.Toplevel):
                                                                         sticky="w")
         wf.columnconfigure(3, weight=1)
 
-        nf = ttk.LabelFrame(frm, text="Talents / Notes", padding=6)
-        nf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+        nf = ttk.LabelFrame(frm, text="Notes", padding=6)
+        nf.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
         self.notes = tk.Text(nf, height=3, width=60, wrap="word")
         self.notes.pack(fill="both", expand=True)
         self.notes.insert("1.0", s.notes)
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="ew")
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew")
         ttk.Button(btns, text="Save Ship", style="Accent.TButton",
                    command=self._save).pack(side="right")
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
 
+        for var in (self.shields_var, self.res_var, self.scale_var, self.tractor_var):
+            var.trace_add("write", lambda *_a: self._update_effective())
         self._update_quality_info()
+        self._update_effective()
         self._refresh_tree()
         make_modal(self, parent)
+
+    def _preview(self) -> Ship:
+        probe = Ship(name="preview", scale=clamp(int_var_value(self.scale_var, 4), 1, 10),
+                     base_shields=max(0, int_var_value(self.shields_var, 0)),
+                     base_resistance=max(0, int_var_value(self.res_var, 0)),
+                     tractor_beam=max(0, int_var_value(self.tractor_var, 0)),
+                     talents=self.talents.selected())
+        return probe
+
+    def _update_effective(self):
+        if not hasattr(self, "effective_lbl"):
+            return
+        p = self._preview()
+        text = f"Effective: Shields {p.max_shields}, Resistance {p.effective_resistance}, " \
+               f"Tractor {p.tractor_strength_rating}"
+        if p.has_talent("Extensive Shuttlebays"):
+            text += f", Small Craft {p.small_craft_readiness}"
+        self.effective_lbl.configure(text=text)
 
     def _update_quality_info(self):
         a, d = CREW_QUALITY.get(self.quality_var.get(), CREW_QUALITY[DEFAULT_CREW_QUALITY])
@@ -1314,22 +1666,25 @@ class ShipEditor(tk.Toplevel):
             messagebox.showerror("Ship", f"A ship named '{name}' already exists.", parent=self)
             return
         ship = self.src
-        old_max, was_full = ship.shields_max, ship.shields >= ship.shields_max
+        was_full = ship.shields >= ship.max_shields
         ship.name = name
         ship.ship_class = self.class_var.get().strip()
         ship.side = self.side_var.get() if self.side_var.get() in SIDES else "NPC"
         ship.scale = clamp(int_var_value(self.scale_var, 4), 1, 10)
         ship.crew_quality = self.quality_var.get()
-        ship.shields_max = max(0, int_var_value(self.shields_var, old_max))
-        ship.resistance = max(0, int_var_value(self.res_var, ship.resistance))
+        ship.base_shields = max(0, int_var_value(self.shields_var, ship.base_shields))
+        ship.base_resistance = max(0, int_var_value(self.res_var, ship.base_resistance))
+        ship.tractor_beam = max(0, int_var_value(self.tractor_var, 0))
         ship.systems = {k: max(1, int_var_value(v, 8)) for k, v in self.sys_vars.items()}
         ship.departments = {k: clamp(int_var_value(v, 2), 0, 5) for k, v in self.dept_vars.items()}
         ship.weapons = self.weapons
+        ship.talents = self.talents.selected()
         ship.notes = self.notes.get("1.0", "end").strip()
-        if self.is_new or was_full:
-            ship.shields = ship.shields_max
-        else:
-            ship.shields = min(ship.shields, ship.shields_max)
+        if ship.cloaked and not ship.has_talent("Cloaking Device"):
+            ship.disengage_cloak()
+        if self.is_new or (was_full and ship.shields_up):
+            ship.shields = ship.max_shields if ship.shields_up else 0
+        ship.clamp_shields()
         self.result = ship
         self.destroy()
 
@@ -1411,6 +1766,7 @@ class CombatHelperApp:
     # ------------------------------------------------------------------- vars
     def _init_vars(self):
         self.gm_mod_var = tk.IntVar(value=0)
+        self.hit_table_var = tk.StringVar(value=DEFAULT_HIT_TABLE)
         self.attacker_var = tk.StringVar()
         self.target_var = tk.StringVar()
         self.station_var = tk.StringVar(value=list(BRIDGE_STATIONS)[0])
@@ -1440,6 +1796,7 @@ class CombatHelperApp:
         self.tgt_reserve_var = tk.BooleanVar()
         self.tgt_shields_up_var = tk.BooleanVar()
         self.tgt_armed_var = tk.BooleanVar()
+        self.tgt_pds_var = tk.BooleanVar()
         self.tgt_set_shields_var = tk.IntVar(value=0)
         # generator
         self.gen_name_var = tk.StringVar()
@@ -1475,6 +1832,11 @@ class CombatHelperApp:
         fm.add_separator()
         fm.add_command(label="Exit", command=self.on_close)
         menubar.add_cascade(label="File", menu=fm)
+        cm = tk.Menu(menubar, tearoff=False)
+        cm.add_command(label="End Round", command=self.end_round)
+        cm.add_command(label="New Scene (reset once-per-scene talents)", command=self.new_scene)
+        cm.add_command(label="New Adventure (refill Crew Support)", command=self.new_adventure)
+        menubar.add_cascade(label="Combat", menu=cm)
         hm = tk.Menu(menubar, tearoff=False)
         hm.add_command(label="Quick Reference...", command=self.show_reference)
         hm.add_command(label="About", command=self.show_about)
@@ -1617,8 +1979,13 @@ class CombatHelperApp:
         ttk.Combobox(gf, textvariable=self.gen_profile_var, values=list(GENERATOR_PROFILES),
                      state="readonly", width=20).grid(row=3, column=1, columnspan=2, sticky="w",
                                                       pady=1)
+        ttk.Label(gf, text="Starship Talents (multi-select)").grid(row=4, column=0,
+                                                                    columnspan=4, sticky="w",
+                                                                    pady=(4, 0))
+        self.gen_talents = TalentPicker(gf, height=5, allow_custom=False)
+        self.gen_talents.grid(row=5, column=0, columnspan=4, sticky="ew")
         gbf = ttk.Frame(gf)
-        gbf.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        gbf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         ttk.Button(gbf, text="Generate NPC Ship", style="Accent.TButton",
                    command=self.generate_npc).pack(side="left")
         ttk.Button(gbf, text="Custom Ship Editor...", command=self.new_ship).pack(side="left",
@@ -1632,8 +1999,37 @@ class CombatHelperApp:
         self.active_name_lbl.grid(row=0, column=0, sticky="w")
         self.active_bar = ShieldBar(af)
         self.active_bar.grid(row=1, column=0, sticky="ew", pady=3)
+        ctl = ttk.Frame(af)
+        ctl.grid(row=2, column=0, sticky="ew", pady=(0, 3))
+        self.cloak_btn = ttk.Button(ctl, text="Engage Cloak", command=self.toggle_cloak)
+        self.cloak_btn.pack(side="left")
+        self.cloak_lbl = ttk.Label(ctl, text="", style="Alert.TLabel")
+        self.cloak_lbl.pack(side="left", padx=6)
+        self.active_res_lbl = ttk.Label(af, text="", style="Bold.TLabel", wraplength=360,
+                                        justify="left")
+        self.active_res_lbl.grid(row=3, column=0, sticky="w")
+        pools = ttk.Frame(af)
+        pools.grid(row=4, column=0, sticky="w", pady=(3, 0))
+        self.crew_support_lbl = ttk.Label(pools, text="Crew Support: -")
+        self.crew_support_lbl.grid(row=0, column=0, sticky="w")
+        ttk.Button(pools, text="-", width=3,
+                   command=lambda: self.adjust_pool_counter("crew_support_used", -1)).grid(
+            row=0, column=1, padx=(6, 1))
+        ttk.Button(pools, text="+", width=3,
+                   command=lambda: self.adjust_pool_counter("crew_support_used", 1)).grid(
+            row=0, column=2)
+        self.small_craft_lbl = ttk.Label(pools, text="Small Craft: -")
+        self.small_craft_lbl.grid(row=1, column=0, sticky="w")
+        self.small_craft_minus = ttk.Button(
+            pools, text="-", width=3,
+            command=lambda: self.adjust_pool_counter("small_craft_deployed", -1))
+        self.small_craft_minus.grid(row=1, column=1, padx=(6, 1))
+        self.small_craft_plus = ttk.Button(
+            pools, text="+", width=3,
+            command=lambda: self.adjust_pool_counter("small_craft_deployed", 1))
+        self.small_craft_plus.grid(row=1, column=2)
         self.active_status_lbl = ttk.Label(af, text="", justify="left", wraplength=360)
-        self.active_status_lbl.grid(row=2, column=0, sticky="w")
+        self.active_status_lbl.grid(row=5, column=0, sticky="w", pady=(3, 0))
 
         tt = ttk.LabelFrame(body, text="Turn Tracker", padding=6)
         tt.grid(row=3, column=0, sticky="ew")
@@ -1694,6 +2090,8 @@ class CombatHelperApp:
                                         variable=self.tsol_mode_var)
         self.tsol_rb1.pack(side="left")
         self.tsol_rb2.pack(side="left", padx=6)
+        self.tsol_both_lbl = ttk.Label(tsf, text="", style="Good.TLabel")
+        self.tsol_both_lbl.pack(side="left")
         ttk.Label(of, text="Scan for Weakness").grid(row=4, column=0, sticky="w")
         swf = ttk.Frame(of)
         swf.grid(row=4, column=1, sticky="w")
@@ -1706,6 +2104,10 @@ class CombatHelperApp:
         self.regen_cb = ttk.Checkbutton(of, text="Regenerate Shields: spend 1 Momentum for "
                                                  "+2 Shields", variable=self.regen_boost_var)
         self.regen_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.secreact_btn = ttk.Button(of, text="Secondary Reactors: spend 2 to restore Reserve "
+                                                "Power (1/scene)",
+                                       command=lambda: self.use_secondary_reactors())
+        self.secreact_btn.grid(row=6, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
         df = ttk.LabelFrame(body, text="Difficulty", padding=6)
         df.grid(row=2, column=0, sticky="ew", pady=(0, 6))
@@ -1726,6 +2128,9 @@ class CombatHelperApp:
                              background="#f6f3fb",
                              padx=6, pady=4, font=tkfont.nametofont("TkDefaultFont"))
         self.hints.grid(row=0, column=0, sticky="ew")
+        hsb = ttk.Scrollbar(hf, orient="vertical", command=self.hints.yview)
+        hsb.grid(row=0, column=1, sticky="ns")
+        self.hints.configure(yscrollcommand=hsb.set)
         self.hints.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
         self.hints.tag_configure("key", font=self.font_bold)
         self.hints.tag_configure("warn", foreground="#b03a2e")
@@ -1802,13 +2207,20 @@ class CombatHelperApp:
                                                                 self.tgt_reserve_var)).pack(
             side="left")
         ttk.Checkbutton(cf, text="Shields Up", variable=self.tgt_shields_up_var,
-                        command=lambda: self.toggle_target_flag("shields_up",
-                                                                self.tgt_shields_up_var)).pack(
-            side="left", padx=6)
+                        command=self.toggle_target_shields).pack(side="left", padx=6)
         ttk.Checkbutton(cf, text="Weapons Armed", variable=self.tgt_armed_var,
                         command=lambda: self.toggle_target_flag("weapons_armed",
                                                                 self.tgt_armed_var)).pack(
             side="left")
+        tcf = ttk.Frame(tf)
+        tcf.grid(row=7, column=0, sticky="w", pady=(3, 0))
+        self.tgt_pds_cb = ttk.Checkbutton(
+            tcf, text="Point Defense active", variable=self.tgt_pds_var,
+            command=lambda: self.toggle_target_flag("point_defense_active", self.tgt_pds_var))
+        self.tgt_pds_cb.pack(side="left")
+        self.tgt_cloak_btn = ttk.Button(tcf, text="Toggle Target Cloak",
+                                        command=self.toggle_target_cloak)
+        self.tgt_cloak_btn.pack(side="left", padx=6)
         shf = ttk.Frame(tf)
         shf.grid(row=6, column=0, sticky="w", pady=(4, 0))
         ttk.Label(shf, text="Shields:").pack(side="left")
@@ -1823,7 +2235,22 @@ class CombatHelperApp:
             side="left", padx=4)
 
         dfm = ttk.LabelFrame(body, text="Tactical Combat & Damage Resolver", padding=6)
-        dfm.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        alf = ttk.LabelFrame(body, text="Active Quality & Talent Alerts", padding=6)
+        alf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        alf.columnconfigure(0, weight=1)
+        self.alerts = tk.Text(alf, height=12, width=50, wrap="word", relief="flat",
+                              background="#fbf6ee", padx=6, pady=4,
+                              font=tkfont.nametofont("TkDefaultFont"))
+        self.alerts.grid(row=0, column=0, sticky="ew")
+        asb = ttk.Scrollbar(alf, orient="vertical", command=self.alerts.yview)
+        asb.grid(row=0, column=1, sticky="ns")
+        self.alerts.configure(yscrollcommand=asb.set)
+        self.alerts.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
+        self.alerts.tag_configure("warn", foreground="#b03a2e")
+        self.alerts.tag_configure("good", foreground="#1e7e46")
+        self.alerts.tag_configure("dim", foreground="#6b6b78")
+        self.alerts.configure(state="disabled")
+        dfm.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         dfm.columnconfigure(2, weight=1)
         self.pending_lbl = ttk.Label(dfm, text="", wraplength=430, justify="left",
                                      style="Good.TLabel")
@@ -1859,23 +2286,29 @@ class CombatHelperApp:
             row=0, column=1, sticky="ew", padx=(4, 0))
 
         hf = ttk.LabelFrame(body, text="System Hit Generator & Shaken Resolver", padding=6)
-        hf.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        hf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         hf.columnconfigure(1, weight=1)
-        ttk.Button(hf, text=f"Roll System Hit (d{SYSTEM_HIT_DIE})",
-                   command=self.roll_system_hit_clicked).grid(row=0, column=0, sticky="w")
+        self.syshit_btn = ttk.Button(hf, text="Roll System Hit",
+                                     command=self.roll_system_hit_clicked)
+        self.syshit_btn.grid(row=0, column=0, sticky="w")
         self.syshit_lbl = ttk.Label(hf, text="-", style="Bold.TLabel")
         self.syshit_lbl.grid(row=0, column=1, sticky="w", padx=6)
         ttk.Button(hf, text="Add Breach There", command=self.breach_last_hit).grid(row=0, column=2)
-        table = "  ".join(f"{lo}-{hi} {SYSTEM_ABBR[sysname]}"
-                          for lo, hi, sysname in SYSTEM_HIT_TABLE)
-        ttk.Label(hf, text=table, style="Info.TLabel").grid(row=1, column=0, columnspan=3,
-                                                             sticky="w", pady=2)
+        tbl = ttk.Frame(hf)
+        tbl.grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        ttk.Label(tbl, text="Table:").pack(side="left")
+        tcb = ttk.Combobox(tbl, textvariable=self.hit_table_var, values=list(SYSTEM_HIT_TABLES),
+                           state="readonly", width=14)
+        tcb.pack(side="left", padx=4)
+        tcb.bind("<<ComboboxSelected>>", lambda _e: self.on_hit_table_change())
+        self.hit_table_lbl = ttk.Label(hf, text="", style="Info.TLabel")
+        self.hit_table_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
         ttk.Button(hf, text="Open Shaken Resolver for Target...",
-                   command=self.shaken_resolver_clicked).grid(row=2, column=0, columnspan=3,
+                   command=self.shaken_resolver_clicked).grid(row=3, column=0, columnspan=3,
                                                               sticky="w", pady=(2, 0))
 
         bf = ttk.LabelFrame(body, text="Breach Tracker (Target)", padding=6)
-        bf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        bf.grid(row=4, column=0, sticky="ew", pady=(0, 6))
         for col, text in enumerate(("System", "Rating", "Breaches", "", "")):
             ttk.Label(bf, text=text, style="Bold.TLabel").grid(row=0, column=col, sticky="w",
                                                                padx=2)
@@ -1896,7 +2329,7 @@ class CombatHelperApp:
                                    pady=(4, 0))
 
         cf2 = ttk.LabelFrame(body, text="Complications & Effects (Target)", padding=6)
-        cf2.grid(row=4, column=0, sticky="ew")
+        cf2.grid(row=5, column=0, sticky="ew")
         cf2.columnconfigure(0, weight=1)
         self.comp_lb = tk.Listbox(cf2, height=4, exportselection=False)
         self.comp_lb.grid(row=0, column=0, columnspan=4, sticky="ew")
@@ -2141,6 +2574,7 @@ class CombatHelperApp:
     def _on_option_change(self):
         if not self._refreshing:
             self._refresh_middle()
+            self._refresh_alerts()
 
     def _on_damage_option_change(self):
         if not self._refreshing:
@@ -2218,7 +2652,7 @@ class CombatHelperApp:
             extra += " SHK" if s.shaken else ""
             self.roster_lb.insert(
                 "end", f"{mark} {s.name[:18]:<18} {side} S{s.scale} "
-                       f"{s.shields:>2}/{s.shields_max:<2} T{s.turns_used}/{s.scale}{extra}")
+                       f"{s.shields:>2}/{s.max_shields:<2} T{s.turns_used}/{s.scale}{extra}")
         if sel and sel[0] < len(self.ships):
             self.roster_lb.selection_set(sel[0])
 
@@ -2228,13 +2662,17 @@ class CombatHelperApp:
         lines = [
             f"{s.ship_class or 'Unknown class'}",
             f"Side: {s.side}   Scale: {s.scale}   Crew: {s.crew_quality} (Attr {a} / Dept {d})",
-            f"Resistance: {s.resistance}"
-            + (f" {s.resistance_bonus:+d} = {s.effective_resistance}" if s.resistance_bonus else ""),
             f"Reserve Power: {yes(s.reserve_power)}   Shields Up: {yes(s.shields_up)}   "
-            f"Weapons Armed: {yes(s.weapons_armed)}",
+            f"Weapons Armed: {yes(s.weapons_armed)}   "
+            f"Tractor Beam: Str {s.tractor_strength_rating}",
             "Systems: " + ", ".join(f"{SYSTEM_ABBR[k]} {v}" for k, v in s.systems.items()),
             "Depts: " + ", ".join(f"{k[:5]} {v}" for k, v in s.departments.items()),
         ]
+        talents = [t for t in s.talents if talent_kind(t) == TALENT]
+        rules = [t for t in s.talents if talent_kind(t) == SPECIAL_RULE]
+        lines.append("Talents: " + (", ".join(talents) if talents else "none"))
+        if rules:
+            lines.append("Special Rules: " + ", ".join(rules))
         breaches = [f"{k} {v}" for k, v in s.breaches.items() if v]
         lines.append("Breaches: " + (", ".join(breaches) if breaches else "none"))
         fx = s.active_effects()
@@ -2251,13 +2689,42 @@ class CombatHelperApp:
             self.active_name_lbl.configure(text="No ship selected")
             self.active_bar.set_value(0, 0)
             self.active_status_lbl.configure(text="")
+            self.active_res_lbl.configure(text="")
+            set_enabled(self.cloak_btn, False)
+            self.cloak_lbl.configure(text="")
             self.turns_lbl.configure(text="Turns used: - / -")
             self.turns_bar.configure(maximum=1, value=0)
             self.turns_info_lbl.configure(text="")
             return
         self.active_name_lbl.configure(text=s.name)
-        self.active_bar.set_value(s.shields, s.shields_max)
+        self.active_bar.set_value(s.shields, s.max_shields)
         self.active_status_lbl.configure(text=self._ship_status_text(s))
+        has_cloak = s.has_talent("Cloaking Device")
+        set_enabled(self.cloak_btn, has_cloak)
+        self.cloak_btn.configure(text="Decloak (Minor)" if s.cloaked else "Engage Cloak")
+        if s.cloaked:
+            self.cloak_lbl.configure(text="CLOAKED" + (" - REVEALED" if s.revealed else ""),
+                                     style="Alert.TLabel")
+        else:
+            self.cloak_lbl.configure(text="Visible" if has_cloak else "No Cloaking Device",
+                                     style="Info.TLabel")
+        self.active_res_lbl.configure(
+            text=f"Shields {s.shields}/{s.max_shields}"
+                 + (f" (base {s.base_shields} +{s.talent_shield_bonus} talents)"
+                    if s.talent_shield_bonus else "")
+                 + ("  [LOWERED]" if not s.shields_up else "")
+                 + f"\nResistance {s.resistance_text()}")
+        self.crew_support_lbl.configure(
+            text=f"Crew Support used: {s.crew_support_used} / {s.crew_support_max}"
+                 + ("  (x2)" if s.has_talent("Abundant Personnel") else ""))
+        if s.small_craft_readiness:
+            self.small_craft_lbl.configure(
+                text=f"Small Craft out: {s.small_craft_deployed} / {s.small_craft_readiness}"
+                     f"  (Scale <= {s.max_small_craft_scale})")
+        else:
+            self.small_craft_lbl.configure(text="Small Craft Readiness: n/a")
+        set_enabled(self.small_craft_minus, s.small_craft_readiness > 0)
+        set_enabled(self.small_craft_plus, s.small_craft_readiness > 0)
         over = s.turns_used > s.scale
         self.turns_lbl.configure(text=f"Turns used: {s.turns_used} / {s.scale}"
                                       + ("  - OVER SCALE LIMIT!" if over else ""),
@@ -2287,11 +2754,15 @@ class CombatHelperApp:
         set_enabled(self.weapon_cb, is_fire)
         set_enabled(self.salvo_cb, is_fire and weapon is not None and weapon.wtype == "Torpedo")
         tsol = is_fire and ship is not None and ship.targeting_solution
-        set_enabled(self.tsol_rb1, tsol)
-        set_enabled(self.tsol_rb2, tsol)
+        fts = ship is not None and ship.has_talent("Fast Targeting Systems")
+        set_enabled(self.tsol_rb1, tsol and not fts)
+        set_enabled(self.tsol_rb2, tsol and not fts)
+        self.tsol_both_lbl.configure(text="BOTH (Fast Targeting)" if fts else "")
         set_enabled(self.scan_rb1, name == "Scan for Weakness")
         set_enabled(self.scan_rb2, name == "Scan for Weakness")
         set_enabled(self.regen_cb, name == "Regenerate Shields")
+        set_enabled(self.secreact_btn, ship is not None and ship.has_talent("Secondary Reactors")
+                    and not ship.secondary_reactors_used and not ship.reserve_power)
 
         rolls = adef["roll"]
         manual = self.mode_var.get() == "manual"
@@ -2313,8 +2784,7 @@ class CombatHelperApp:
             self.resolve_btn.configure(text="RESOLVE (MANUAL SUCCESSES)" if manual
                                        else "ROLL & RESOLVE")
 
-        total, parts = compute_difficulty(name, adef, ship, weapon, self.range_var.get(),
-                                          int_var_value(self.gm_mod_var, 0))
+        total, parts = self.compute_current_difficulty()
         self.diff_total_lbl.configure(text="-" if total is None else str(total))
         self.diff_parts_lbl.configure(text=format_difficulty(total, parts))
         dice = int_var_value(self.dice_var, 2)
@@ -2429,21 +2899,59 @@ class CombatHelperApp:
             if adef["sensor"] and ship.calibrated_sensors:
                 L.append(("Sensors calibrated: re-roll 1d20 / ignore 1 trait on this task.",
                           "good"))
+            if self._is_rapid_fire_salvo(ship, name, weapon):
+                L.append(("Rapid-Fire Torpedo Launcher: salvo gains +1 Damage; Tactical may "
+                          "re-roll 1d20 (auto-roll re-rolls a failed die).", "good"))
+            if adef["assist"] and ship.ship_assist_dice(adef["assist"][0]) > 1:
+                L.append(("Advanced Sensor Suites: the ship assists with 2d20.", "good"))
+            elif (adef["assist"] and adef["assist"][0] == "Sensors"
+                  and ship.has_talent("Advanced Sensor Suites")):
+                alerts.append("Advanced Sensor Suites suppressed: Sensors has breaches.")
+            if adef["assist"] and ship.assist_complication_from < 20:
+                alerts.append(f"Experimental Vessel: ship assist dice complicate on "
+                              f"{ship.assist_complication_from}-20.")
+            if name == "Damage Control" and ship.has_talent("Rugged Design"):
+                L.append(("Rugged Design: Damage Control -1 Difficulty (included).", "good"))
+            if ship.cloaked:
+                if name in HOSTILE_ACTIONS:
+                    alerts.append(f"{ship.name} is CLOAKED: it must decloak (Minor Action) "
+                                  f"before {name} - you will be asked to decloak.")
+                if name == "Regenerate Shields":
+                    alerts.append("Cloaked: shields cannot be raised; regeneration is stored "
+                                  "for when they are raised.")
             if ship.rerouted_power and ship.rerouted_power == adef["system"]:
                 L.append((f"Rerouted Reserve Power boosts this {adef['system']} task - apply its "
                           "benefit (it is consumed).", "good"))
             if ship.jammed and adef["system"] in ("Communications", "Sensors"):
                 alerts.append("Ship is Jammed: +1 Difficulty (included).")
         if target and ship and target is not ship:
+            if target.cloaked and not target.revealed and name in TARGETED_ACTIONS:
+                alerts.append(f"{target.name} is CLOAKED and not revealed: it cannot be targeted "
+                              "(use Sensor Operations > Reveal first).")
+            if name == "Reveal":
+                if target.cloaked:
+                    L.append((f"Reveal vs cloaked {target.name}: success lets ships target it "
+                              "until End Round.", "good"))
+                else:
+                    L.append((f"{target.name} is not cloaked.", ""))
+            if adef["attack"] and target.attack_pattern:
+                L.append((f"{target.name} is flying an Attack Pattern: -1 Difficulty "
+                          "(included).", "good"))
+            if (name == "Fire" and weapon is not None and weapon.wtype == "Torpedo"
+                    and target.has_talent("Point Defense System") and target.point_defense_active):
+                alerts.append(f"{target.name} Point Defense System: Cover, +1 Difficulty vs "
+                              "torpedoes (included).")
             if adef["attack"]:
                 mode = self._defense_mode(target)
                 if mode == "evasive":
-                    alerts.append(f"{target.name} is using Evasive Action: OPPOSED task - "
-                                  "defender rolls Daring + Conn (assist Structure + Conn). The "
-                                  "attacker must also beat the defender's successes.")
+                    alerts.append(f"{target.name} is using Evasive Action: OPPOSED task - the "
+                                  "defender rolls Daring + Conn (assist Structure + Conn) first; "
+                                  "their successes replace the base Difficulty (other modifiers "
+                                  "still apply, ties go to the attacker).")
                 elif mode == "defensive":
-                    alerts.append(f"{target.name} is using Defensive Fire: OPPOSED task - "
-                                  "defender rolls Daring + Security (assist Weapons + Security).")
+                    alerts.append(f"{target.name} is using Defensive Fire: OPPOSED task - the "
+                                  "defender rolls Daring + Security (assist Weapons + Security) "
+                                  "first; their successes replace the base Difficulty.")
                 if target.weakness_scanned:
                     L.append((f"{target.name} was scanned for weakness: "
                               + ("+2 Damage" if target.weakness_scanned == "damage"
@@ -2476,19 +2984,17 @@ class CombatHelperApp:
             self.tgt_info_lbl.configure(
                 text=f"{t.ship_class or 'Unknown class'} | {t.side} | Scale {t.scale} | "
                      f"Crew {t.crew_quality} ({a}/{d}) | Turns {t.turns_used}/{t.scale}")
-            self.tgt_bar.set_value(t.shields, t.shields_max)
+            self.tgt_bar.set_value(t.shields, t.max_shields)
             self.tgt_res_lbl.configure(
-                text=f"Resistance: {t.resistance}"
-                     + (f" {t.resistance_bonus:+d} (Modulated) = {t.effective_resistance}"
-                        if t.resistance_bonus else "")
-                     + f"    Shaken thresholds: <{t.shields_max * 0.5:g} / <{t.shields_max * 0.25:g}")
+                text=f"Resistance: {t.resistance_text()}\nShaken thresholds: "
+                     f"<{t.max_shields * 0.5:g} / <{t.max_shields * 0.25:g}")
             fx = t.active_effects()
             self.tgt_fx_lbl.configure(text="Effects: " + (", ".join(fx) if fx else "none"),
                                       style="Alert.TLabel" if t.shaken else "TLabel")
             self.tgt_reserve_var.set(t.reserve_power)
             self.tgt_shields_up_var.set(t.shields_up)
             self.tgt_armed_var.set(t.weapons_armed)
-            self.tgt_set_shields_var.set(t.shields)
+            self.tgt_set_shields_var.set(self._target_shield_value(t))
             for sysname, (rating, count) in self.breach_rows.items():
                 rating.configure(text=str(t.systems.get(sysname, 0)))
                 n = t.breaches.get(sysname, 0)
@@ -2506,6 +3012,15 @@ class CombatHelperApp:
             for c in t.complications:
                 self.comp_lb.insert("end", c)
         self.syshit_lbl.configure(text=self.last_system_hit or "-")
+        self.syshit_btn.configure(text=f"Roll System Hit (d{self.hit_table[-1][1]})")
+        self.hit_table_lbl.configure(text="  ".join(
+            f"{lo}-{hi} {SYSTEM_ABBR[n]}" if lo != hi else f"{lo} {SYSTEM_ABBR[n]}"
+            for lo, hi, n in self.hit_table))
+        set_enabled(self.tgt_pds_cb, t is not None and t.has_talent("Point Defense System"))
+        set_enabled(self.tgt_cloak_btn, t is not None and t.has_talent("Cloaking Device"))
+        self.tgt_pds_var.set(bool(t is not None and t.has_talent("Point Defense System")
+                                  and t.point_defense_active))
+        self._refresh_alerts()
         pa = self.pending_attack
         if pa:
             bits = [f"PENDING HIT: {pa['attacker']} -> {pa['target']} with {pa['label']}"]
@@ -2513,6 +3028,8 @@ class CombatHelperApp:
                 bits.append(f"Calibrated +{pa['calibrate']}")
             if pa["scan_damage"]:
                 bits.append(f"Weakness +{pa['scan_damage']}")
+            if pa.get("rapid_fire"):
+                bits.append(f"Rapid-Fire salvo +{pa['rapid_fire']}")
             if pa["choose_system"]:
                 bits.append("Targeting Solution: choose system")
             if pa["ram"]:
@@ -2522,6 +3039,110 @@ class CombatHelperApp:
             self.pending_lbl.configure(text="No pending attack - damage can still be applied "
                                             "manually to the selected target.")
         self._refresh_damage_preview()
+
+    def _talent_status(self, ship, role):
+        """Live, context-aware status lines for each talent / special rule of a ship."""
+        name = self.action_var.get()
+        weapon = self.selected_weapon() if name == "Fire" else None
+        acting = role == "attacker"
+        lines = []
+        for t in ship.talents:
+            tag = ""
+            if t in TALENT_RESISTANCE_BONUS:
+                text = (f"+{TALENT_RESISTANCE_BONUS[t]} Resistance included "
+                        f"(Resistance {ship.effective_resistance}).")
+            elif t in TALENT_SHIELD_BONUS:
+                text = (f"+{TALENT_SHIELD_BONUS[t]} max Shields included (max "
+                        f"{ship.max_shields}).")
+            elif t == "Cloaking Device":
+                if ship.cloaked:
+                    text = ("CLOAKED: Shields 0 and cannot be raised; cannot attack until it "
+                            "decloaks (Minor Action). "
+                            + ("REVEALED this round - it can be targeted." if ship.revealed
+                               else "Must be revealed (Reveal, Difficulty 3) before it can be "
+                                    "targeted."))
+                    tag = "warn"
+                else:
+                    text = "Not engaged. Use Engage Cloak in Active Ship Status."
+            elif t == "Extensive Shuttlebays":
+                text = (f"Small Craft Readiness {ship.small_craft_readiness} (Scale - 1); "
+                        "can support Scale 2 craft such as runabouts.")
+            elif t == "Rapid-Fire Torpedo Launcher":
+                text = "Torpedo Salvo: +1 Damage and Tactical may re-roll 1d20."
+                if (acting and weapon is not None and weapon.wtype == "Torpedo"
+                        and self.salvo_var.get()):
+                    text = "ACTIVE on this salvo: +1 Damage, re-roll 1d20 on the attack."
+                    tag = "good"
+            elif t == "Fast Targeting Systems":
+                text = "Targeting Solution grants BOTH the d20 re-roll AND system choice."
+                if acting and ship.targeting_solution:
+                    text = "Targeting Solution ready: re-roll AND choose the system hit."
+                    tag = "good"
+            elif t == "Advanced Sensor Suites":
+                if ship.breaches.get("Sensors", 0):
+                    text = "SUPPRESSED: Sensors has breaches - ship assists with 1d20."
+                    tag = "warn"
+                else:
+                    text = "Assisting a Sensors task: the ship rolls 2d20 instead of 1d20."
+                    adef = self.current_action()
+                    if acting and adef and adef["assist"] and adef["assist"][0] == "Sensors":
+                        tag = "good"
+            elif t in EXPERIMENTAL_RULES:
+                text = (f"Ship assist dice complicate on {ship.assist_complication_from}-20.")
+                tag = "warn" if acting and (self.current_action() or {}).get("assist") else ""
+            elif t == "Abundant Personnel":
+                text = (f"Crew Support doubled: {ship.crew_support_max} "
+                        f"({ship.crew_support_used} used).")
+            elif t == "Point Defense System":
+                if ship.point_defense_active:
+                    text = "ACTIVE: torpedo attacks against this ship are +1 Difficulty (Cover)."
+                    if (not acting and name == "Fire" and self.attacker is not None):
+                        aw = self.selected_weapon()
+                        if aw is not None and aw.wtype == "Torpedo":
+                            tag = "warn"
+                else:
+                    text = "Inactive (toggle in Target Status)."
+            else:
+                text = talent_text(t)
+            kind = " [Special Rule]" if talent_kind(t) == SPECIAL_RULE else ""
+            if t not in STARSHIP_TALENTS:
+                kind = " [custom]"
+            lines.append((f"  - {t}{kind}: {text}", tag))
+        return lines
+
+    def _talent_alert_lines(self):
+        lines = []
+        ship, target = self.attacker, self.target
+        for role, s in (("attacker", ship), ("target", target)):
+            if s is None or (role == "target" and s is ship):
+                continue
+            lines.append((f"{'ATTACKER' if role == 'attacker' else 'TARGET'}: {s.name}", "head"))
+            status = self._talent_status(s, role)
+            lines.extend(status if status else [("  (no talents or special rules)", "dim")])
+        weapon = None
+        pa = self.pending_attack
+        if pa and pa.get("weapon") is not None:
+            weapon = pa["weapon"]
+        elif self.action_var.get() == "Fire":
+            weapon = self.selected_weapon()
+        if weapon is not None:
+            lines.append((f"WEAPON: {weapon.name} ({weapon.wtype}, Dmg {weapon.damage})", "head"))
+            if not weapon.qualities:
+                lines.append(("  (no qualities)", "dim"))
+            for q, v in weapon.qualities.items():
+                has_x, desc = WEAPON_QUALITIES.get(q, (False, ""))
+                label = f"{q} {v}" if has_x else q
+                tag = "warn" if q in ("Cumbersome", "Devastating", "Persistent", "Dampening",
+                                      "Jamming", "Slowing", "High Yield") else ""
+                lines.append((f"  - {label}: {desc}", tag))
+        return lines
+
+    def _refresh_alerts(self):
+        self.alerts.configure(state="normal")
+        self.alerts.delete("1.0", "end")
+        for text, tag in self._talent_alert_lines():
+            self.alerts.insert("end", text + "\n", tag)
+        self.alerts.configure(state="disabled")
 
     def _damage_weapon(self):
         if self.pending_attack:
@@ -2535,12 +3156,11 @@ class CombatHelperApp:
         return payer is not None and payer.side == "NPC"
 
     def _refresh_damage_preview(self):
-        t = self.target
         weapon = self._damage_weapon()
         pa = self.pending_attack
-        calib = pa["calibrate"] if pa else 0
-        scan = pa["scan_damage"] if pa else 0
-        self.dmg_auto_lbl.configure(text=f"+{calib} calibrated, +{scan} weakness" if pa else "")
+        t = (self.ship_by_name(pa["target"]) if pa else None) or self.target
+        auto = pending_damage_bonus(pa)
+        self.dmg_auto_lbl.configure(text=f"+{auto} automatic (see pending hit)" if pa else "")
         bonus = int_var_value(self.dmg_bonus_var, 0)
         each = bonus_damage_cost_each(weapon)
         dev_cost = devastating_attack_cost(weapon)
@@ -2552,12 +3172,12 @@ class CombatHelperApp:
         if t is None:
             self.dmg_preview_lbl.configure(text="Select a target.")
             return
-        raw = int_var_value(self.dmg_base_var, 0) + calib + scan + bonus
-        out = resolve_shield_damage(t.shields, t.shields_max, raw, t.effective_resistance,
+        raw = int_var_value(self.dmg_base_var, 0) + auto + bonus
+        out = resolve_shield_damage(t.shields, t.max_shields, raw, t.effective_resistance,
                                     self.pierce_var.get())
         res_txt = "Piercing" if self.pierce_var.get() else f"Resistance {out.resistance_applied}"
-        text = (f"Raw {raw} - {res_txt} = {out.final_damage} damage  ->  Shields "
-                f"{out.shields_before} -> {out.shields_after}/{t.shields_max}")
+        text = (f"vs {t.name}: Raw {raw} - {res_txt} = {out.final_damage} damage  ->  Shields "
+                f"{out.shields_before} -> {out.shields_after}/{t.max_shields}")
         consequences = [f"SHAKEN ({r})" for r in out.shaken_reasons]
         consequences += [f"BREACH ({r})" for r in out.breach_reasons]
         if consequences:
@@ -2580,6 +3200,22 @@ class CombatHelperApp:
                      f"({ship.turns_used}/{ship.scale}).", "alert")
         self.changed()
 
+    def adjust_pool_counter(self, attr, delta):
+        ship = self.attacker
+        if ship is None:
+            return
+        limit = ship.crew_support_max if attr == "crew_support_used" else ship.small_craft_readiness
+        new = clamp(getattr(ship, attr) + delta, 0, limit)
+        pool = "Crew Support" if attr == "crew_support_used" else "Small Craft Readiness"
+        if new == getattr(ship, attr):
+            if delta > 0:
+                self.log(f"{ship.name}: no {pool} left.", "alert")
+            return
+        setattr(ship, attr, new)
+        label = "Crew Support used" if attr == "crew_support_used" else "Small craft deployed"
+        self.log(f"{ship.name}: {label} {new}/{limit}.")
+        self.changed()
+
     def reset_turns(self):
         ship = self.attacker
         if ship is None:
@@ -2593,8 +3229,10 @@ class CombatHelperApp:
         ended = self.round
         for ship in self.ships:
             for eff in list(ship.persistent_effects):
-                self._inflict_damage(ship, eff["amount"], True,
+                self._inflict_damage(ship, eff["amount"], bool(eff.get("piercing")),
                                      f"Persistent damage ({eff['source']})")
+                eff["rounds"] = eff.get("rounds", 1) - 1
+            ship.persistent_effects = [e for e in ship.persistent_effects if e["rounds"] > 0]
         for ship in self.ships:
             ship.reset_round()
         self.log(f"--- END OF ROUND {ended} ---", "separator")
@@ -2608,7 +3246,8 @@ class CombatHelperApp:
         name = self.action_var.get()
         weapon = self.selected_weapon() if name == "Fire" else None
         return compute_difficulty(name, self.current_action(), self.attacker, weapon,
-                                  self.range_var.get(), int_var_value(self.gm_mod_var, 0))
+                                  self.range_var.get(), int_var_value(self.gm_mod_var, 0),
+                                  target=self.target)
 
     def resolve_action(self):
         ship = self.attacker
@@ -2629,15 +3268,15 @@ class CombatHelperApp:
             self.show_error("No weapon", f"{ship.name} has no weapon selected. Add weapons in "
                                          "the ship editor.")
             return
-        reuse_threat = self._precheck_action(ship, name, adef, weapon)
+        reuse_threat = self._precheck_action(ship, name, adef, weapon, target)
         if reuse_threat is None:
             return
-        difficulty, _parts = self.compute_current_difficulty()
+        difficulty, parts = self.compute_current_difficulty()
         if not self._pay_action_costs(ship, name, adef, weapon, reuse_threat):
             return
         outcome = None
         if adef["roll"]:
-            outcome = self._perform_task(ship, name, adef, target, difficulty)
+            outcome = self._perform_task(ship, name, adef, target, difficulty, weapon, parts)
         else:
             self.result_lbl.configure(text=f"{name} executed.", style="Good.TLabel")
             self.log(f"{ship.name}: {name} ({adef['kind']} Action).")
@@ -2649,10 +3288,17 @@ class CombatHelperApp:
         self._apply_effect(ship, name, adef, target, weapon, outcome)
         self.changed()
 
-    def _precheck_action(self, ship, name, adef, weapon):
+    def _precheck_action(self, ship, name, adef, weapon, target=None):
         """Warnings / confirmations. Returns Threat to spend for system re-use, or None to abort."""
         reuse_threat = 0
         band = self.range_var.get()
+        if name in ("Cloak", "Decloak") and not ship.has_talent("Cloaking Device"):
+            self.show_error("Cloaking Device", f"{ship.name} does not have the Cloaking Device "
+                                               "talent.")
+            return None
+        if name == "Cloak" and ship.cloaked:
+            self.show_info("Cloak", f"{ship.name} is already cloaked.")
+            return None
         if adef["kind"] == "Major":
             if ship.brace_for_impact and not self.ask_yes_no(
                     "Brace for Impact!", f"{ship.name} is bracing for impact and cannot take a "
@@ -2704,6 +3350,24 @@ class CombatHelperApp:
                 not self.ask_yes_no("Out of range", f"{name} works within Long range.\n\n"
                                                     "Proceed anyway?"):
             return None
+        if name == "Regenerate Shields" and ship.cloaked and not self.ask_yes_no(
+                "Cloaked", f"{ship.name} is cloaked: its shields cannot be raised. Regenerate the "
+                           "lowered shields anyway (restored when they are raised)?"):
+            return None
+        if (target is not None and target is not ship and target.cloaked and not target.revealed
+                and name in TARGETED_ACTIONS):
+            if not self.ask_yes_no(
+                    "Target cloaked", f"{target.name} is cloaked and has not been revealed, so it "
+                                      "cannot be targeted. Use Sensor Operations > Reveal first."
+                                      "\n\nProceed anyway (GM override)?"):
+                return None
+            self.log(f"GM override: {ship.name} targets the cloaked {target.name}.", "alert")
+        if ship.cloaked and name in HOSTILE_ACTIONS:
+            if not self.ask_yes_no(
+                    "Cloaked", f"{ship.name} is cloaked and cannot attack or use its tractor "
+                               "beam.\n\nDecloak now (Minor Action) and continue?"):
+                return None
+            self._decloak(ship, f" to use {name}")
         return reuse_threat
 
     def _pay_action_costs(self, ship, name, adef, weapon, reuse_threat) -> bool:
@@ -2744,13 +3408,28 @@ class CombatHelperApp:
         dice = [make_die(a + d, d, "crew", self.rng) for _ in range(2)]
         s_sys, s_dept = assist
         dice.append(make_die(target.systems[s_sys] + target.departments[s_dept],
-                             target.departments[s_dept], "ship", self.rng))
+                             target.departments[s_dept], "ship", self.rng,
+                             comp_from=target.assist_complication_from))
         out = evaluate_task(dice, 0)
         desc = (f"Opposed: {target.name} defends with {attr_name} + {dept_name} "
                 f"[{format_dice(dice)}] -> {out.successes} success(es).")
         return out, desc
 
-    def _perform_task(self, ship, name, adef, target, difficulty):
+    def _uses_tsol_reroll(self, ship, name):
+        return (name == "Fire" and ship.targeting_solution
+                and (self.tsol_mode_var.get() == "reroll"
+                     or ship.has_talent("Fast Targeting Systems")))
+
+    def _uses_tsol_choice(self, ship, name):
+        return (name == "Fire" and ship.targeting_solution
+                and (self.tsol_mode_var.get() == "choose"
+                     or ship.has_talent("Fast Targeting Systems")))
+
+    def _is_rapid_fire_salvo(self, ship, name, weapon):
+        return (name == "Fire" and weapon is not None and weapon.wtype == "Torpedo"
+                and self.salvo_var.get() and ship.has_talent("Rapid-Fire Torpedo Launcher"))
+
+    def _perform_task(self, ship, name, adef, target, difficulty, weapon=None, parts=None):
         attr_v = int_var_value(self.crew_attr_var, 10)
         dept_v = int_var_value(self.crew_dept_var, 3)
         crit = max(1, dept_v) if self.focus_var.get() else 1
@@ -2767,6 +3446,9 @@ class CombatHelperApp:
                 opposition = opp_out.successes
                 self.opp_var.set(opposition)
                 self.log(desc)
+            difficulty = opposed_difficulty(parts or [("Base", 0)], opposition)
+            self.log(f"Opposed task: Difficulty = defender's {opposition} success(es) + "
+                     f"modifiers = {difficulty}.")
         notes = []
         if manual:
             total = int_var_value(self.manual_succ_var, 0)
@@ -2774,20 +3456,42 @@ class CombatHelperApp:
             dice_text = f"{total} success(es) entered manually"
             if adef["sensor"] and ship.calibrated_sensors:
                 notes.append("Calibrated Sensors: apply the re-roll / ignore-trait benefit")
+            if self._uses_tsol_reroll(ship, name):
+                notes.append("Targeting Solution: apply the d20 re-roll")
+            if self._is_rapid_fire_salvo(ship, name, weapon):
+                notes.append("Rapid-Fire Torpedo Launcher: Tactical may re-roll 1d20")
+            if name == "Damage Control" and ship.has_talent("Rugged Design"):
+                notes.append("Rugged Design: apply the 1d20 re-roll")
         else:
             dice = [make_die(attr_v + dept_v, crit, "crew", self.rng) for _ in range(n)]
-            if name == "Fire" and ship.targeting_solution and self.tsol_mode_var.get() == "reroll":
-                rr = reroll_worst(dice, self.rng)
-                if rr:
-                    notes.append(f"Targeting Solution re-roll {rr[0]} -> {rr[1]}")
+            rerolls = []
+            if self._uses_tsol_reroll(ship, name):
+                rerolls.append("Targeting Solution")
+            if self._is_rapid_fire_salvo(ship, name, weapon):
+                rerolls.append("Rapid-Fire Torpedo Launcher")
             if adef["sensor"] and ship.calibrated_sensors:
+                rerolls.append("Calibrated Sensors")
+            if name == "Damage Control" and ship.has_talent("Rugged Design"):
+                rerolls.append("Rugged Design")
+            for source in rerolls:
                 rr = reroll_worst(dice, self.rng)
-                if rr:
-                    notes.append(f"Calibrated Sensors re-roll {rr[0]} -> {rr[1]}")
+                notes.append(f"{source} re-roll {rr[0]} -> {rr[1]}" if rr
+                             else f"{source} re-roll not needed")
             if self.assist_var.get() and adef["assist"]:
                 s_sys, s_dept = adef["assist"]
-                dice.append(make_die(ship.systems.get(s_sys, 0) + ship.departments.get(s_dept, 0),
-                                     ship.departments.get(s_dept, 0), "ship", self.rng))
+                count = ship.ship_assist_dice(s_sys)
+                if count > 1:
+                    notes.append(f"Advanced Sensor Suites: {count} ship assist dice")
+                elif s_sys == "Sensors" and ship.has_talent("Advanced Sensor Suites"):
+                    notes.append("Advanced Sensor Suites suppressed (Sensors breached)")
+                if ship.assist_complication_from < 20:
+                    notes.append(f"ship dice complicate on {ship.assist_complication_from}-20 "
+                                 "(Experimental Vessel)")
+                for _ in range(count):
+                    dice.append(make_die(
+                        ship.systems.get(s_sys, 0) + ship.departments.get(s_dept, 0),
+                        ship.departments.get(s_dept, 0), "ship", self.rng,
+                        comp_from=ship.assist_complication_from))
             if adef["attack"] and ship.attack_pattern:
                 ca, cd = ship.crew_ratings()
                 dice.append(make_die(ca + cd, cd, "assist", self.rng))
@@ -2805,7 +3509,7 @@ class CombatHelperApp:
         verdict = "SUCCESS" if outcome.success else "FAILURE"
         vs = f"Difficulty {difficulty}"
         if opposition is not None:
-            vs += f", must beat defender's {opposition}"
+            vs += f" (opposed: defender scored {opposition})"
         gain = "Momentum" if ship.side == "Player" else "Threat"
         summary = (f"{verdict}: {outcome.successes} success(es) vs {vs}"
                    + (f"  ->  +{outcome.excess} {gain}" if outcome.excess else ""))
@@ -2848,6 +3552,19 @@ class CombatHelperApp:
             self.log(f"{ship.name}'s commander assists up to two allies' next tasks.", "success")
         elif name == "Rally":
             self.log(f"{ship.name} rallies the crew.", "success")
+        elif name == "Cloak":
+            ship.engage_cloak()
+            self.log(f"{ship.name} engages its cloaking device: Cloaked trait, Shields 0 and "
+                     "cannot be raised, no attacks until it decloaks.", "success")
+        elif name == "Decloak":
+            if ship.cloaked:
+                self._decloak(ship)
+            else:
+                self.log(f"{ship.name} is not cloaked.")
+        elif name == "Reveal" and target is not None and target is not ship and target.cloaked:
+            target.revealed = True
+            self.log(f"{ship.name} reveals the cloaked {target.name}: it can be targeted until "
+                     "End Round (it is still Cloaked).", "success")
         elif name in ("Impulse", "Thrusters", "Launch Probe", "Maneuver", "Sensor Sweep",
                       "Reveal", "Transport"):
             self.log(f"{ship.name}: {name} - {adef['reminder']}", "success")
@@ -2882,7 +3599,7 @@ class CombatHelperApp:
                      "until End Round.", "success")
         elif name == "Tractor Beam":
             target.tractored_by = ship.name
-            target.tractor_strength = max(0, ship.scale - 1)
+            target.tractor_strength = ship.tractor_strength_rating
             self.log(f"{ship.name} locks a tractor beam on {target.name} (Strength "
                      f"{target.tractor_strength}). Target is immobilised.", "success")
         elif name == "Calibrate Sensors":
@@ -2899,10 +3616,16 @@ class CombatHelperApp:
             amount = max(0, int_var_value(self.crew_dept_var, 0))
             if self.regen_boost_var.get() and self.pay_for_side(ship, 1, "Regenerate +2"):
                 amount += 2
-            before = ship.shields
-            ship.shields = min(ship.shields_max, ship.shields + amount)
-            self.log(f"{ship.name} regenerates shields: {before} -> {ship.shields}/"
-                     f"{ship.shields_max} (+{amount}).", "success")
+            if ship.shields_up:
+                before = ship.shields
+                ship.shields = min(ship.max_shields, ship.shields + amount)
+                self.log(f"{ship.name} regenerates shields: {before} -> {ship.shields}/"
+                         f"{ship.max_shields} (+{amount}).", "success")
+            else:
+                before = ship.stored_shields if ship.stored_shields >= 0 else ship.max_shields
+                ship.stored_shields = min(ship.max_shields, before + amount)
+                self.log(f"{ship.name} regenerates its lowered shields: {before} -> "
+                         f"{ship.stored_shields} (applied when raised).", "success")
         elif name == "Regain Power":
             ship.reserve_power = True
             ship.regain_power_penalty = 0
@@ -2913,6 +3636,55 @@ class CombatHelperApp:
             if sysname:
                 ship.rerouted_power = sysname
                 self.log(f"{ship.name} reroutes Reserve Power to {sysname}.", "success")
+            if ship.has_talent("Backup EPS Conduits"):
+                self.log(f"Reminder: {ship.name} has Backup EPS Conduits - apply the talent's "
+                         "benefit to this power reroute (GM ruling).", "alert")
+            if (ship.has_talent("Secondary Reactors") and not ship.secondary_reactors_used
+                    and not ship.reserve_power):
+                payer = "Threat" if ship.side == "NPC" else "Momentum"
+                if self.ask_yes_no("Secondary Reactors",
+                                   f"Secondary Reactors: spend 2 {payer} (Immediate) to restore "
+                                   f"{ship.name}'s Reserve Power now? (once per scene)"):
+                    self.use_secondary_reactors(ship)
+
+    def use_secondary_reactors(self, ship=None):
+        ship = ship or self.attacker
+        if ship is None or not ship.has_talent("Secondary Reactors"):
+            return
+        if ship.secondary_reactors_used:
+            self.show_info("Secondary Reactors", f"{ship.name} already used its Secondary "
+                                                 "Reactors this scene (Combat > New Scene "
+                                                 "resets it).")
+            return
+        if ship.reserve_power:
+            self.show_info("Secondary Reactors", f"{ship.name} already has Reserve Power.")
+            return
+        if not self.pay_for_side(ship, 2, "Secondary Reactors"):
+            return
+        ship.reserve_power = True
+        ship.secondary_reactors_used = True
+        self.log(f"{ship.name}: Secondary Reactors restore Reserve Power (used for this scene).",
+                 "success")
+        self.changed()
+
+    def new_scene(self):
+        for ship in self.ships:
+            ship.secondary_reactors_used = False
+        self.log("--- NEW SCENE --- once-per-scene talents (Secondary Reactors) are available "
+                 "again.", "separator")
+        self.changed()
+
+    def new_adventure(self):
+        if not self.ask_yes_no("New Adventure", "Refill every ship's Crew Support and recover "
+                                                "all deployed small craft?"):
+            return
+        for ship in self.ships:
+            ship.crew_support_used = 0
+            ship.small_craft_deployed = 0
+            ship.secondary_reactors_used = False
+        self.log("--- NEW ADVENTURE --- Crew Support refilled, small craft recovered.",
+                 "separator")
+        self.changed()
 
     def _prepare(self, ship):
         opts = [f"Shields: {'Lower' if ship.shields_up else 'Raise'}",
@@ -2923,9 +3695,10 @@ class CombatHelperApp:
             self.log(f"{ship.name}: Prepare cancelled.")
             return
         if choice.startswith("Shields"):
-            ship.shields_up = not ship.shields_up
-            self.log(f"{ship.name} {'raises' if ship.shields_up else 'lowers'} shields.",
-                     "success")
+            if ship.shields_up:
+                self._lower_shields(ship)
+            else:
+                self._raise_shields(ship)
         elif choice.startswith("Weapons"):
             ship.weapons_armed = not ship.weapons_armed
             self.log(f"{ship.name} {'arms' if ship.weapons_armed else 'disarms'} weapons.",
@@ -2941,22 +3714,37 @@ class CombatHelperApp:
                 "Damage Control", f"Patch a breach on which {ship.name} system?",
                 damaged, damaged[0])
             if sysname:
-                ship.breaches[sysname] -= 1
-                if ship.breaches[sysname] == 0 and sysname in ship.devastating_systems:
-                    ship.devastating_systems.remove(sysname)
-                self.log(f"{ship.name}: Damage Control patches 1 breach on {sysname} "
-                         f"({ship.breaches[sysname]} left).", "success")
+                self._patch_breach(ship, sysname, "Damage Control")
+            remaining = [s for s in SYSTEMS if ship.breaches.get(s, 0) > 0]
+            payer = "Threat" if ship.side == "NPC" else "Momentum"
+            if (sysname and remaining and ship.has_talent("Rugged Design")
+                    and self.ask_yes_no("Rugged Design",
+                                        f"Rugged Design: spend 2 {payer} to patch a second "
+                                        f"breach on {ship.name}?")
+                    and self.pay_for_side(ship, 2, "Rugged Design second patch")):
+                second = remaining[0] if len(remaining) == 1 else self.ask_choice(
+                    "Rugged Design", "Patch a second breach on which system?", remaining,
+                    remaining[0])
+                if second:
+                    self._patch_breach(ship, second, "Rugged Design")
         else:
             self.log(f"{ship.name}: Damage Control - no breaches to patch.")
-        if ship.persistent_effects:
-            eff = ship.persistent_effects.pop(0)
-            self.log(f"{ship.name}: Damage Control also extinguishes Persistent damage from "
-                     f"{eff['source']}.", "success")
+        if ship.has_talent("Improved Damage Control"):
+            self.log(f"Reminder: {ship.name} has Improved Damage Control - apply the talent's "
+                     "benefit to this repair (GM ruling).", "alert")
+
+    def _patch_breach(self, ship, sysname, source):
+        ship.breaches[sysname] = max(0, ship.breaches.get(sysname, 0) - 1)
+        if ship.breaches[sysname] == 0 and sysname in ship.devastating_systems:
+            ship.devastating_systems.remove(sysname)
+        self.log(f"{ship.name}: {source} patches 1 breach on {sysname} "
+                 f"({ship.breaches[sysname]} left).", "success")
 
     def _resolve_attack(self, ship, name, target, weapon, hit):
         calib = 1 if name == "Fire" and ship.calibrated_weapons else 0
         scan = target.weakness_scanned
-        choose = name == "Fire" and ship.targeting_solution and self.tsol_mode_var.get() == "choose"
+        choose = self._uses_tsol_choice(ship, name)
+        rapid = 1 if self._is_rapid_fire_salvo(ship, name, weapon) else 0
         if name == "Fire":
             ship.calibrated_weapons = False
             ship.targeting_solution = False
@@ -2979,7 +3767,7 @@ class CombatHelperApp:
             "attacker": ship.name, "target": target.name, "label": label,
             "weapon": copy.deepcopy(weapon) if name == "Fire" else None,
             "calibrate": calib, "scan_damage": 2 if scan == "damage" else 0,
-            "choose_system": choose, "ram": name == "Ram",
+            "rapid_fire": rapid, "choose_system": choose, "ram": name == "Ram",
         }
         self.dmg_weapon_var.set(label)
         self.dmg_base_var.set(base)
@@ -2989,6 +3777,7 @@ class CombatHelperApp:
         self.log(f"HIT - {ship.name}'s {label} strikes {target.name}! Base damage {base}"
                  + (f" +{calib} calibrated" if calib else "")
                  + (" +2 weakness" if scan == "damage" else "")
+                 + (" +1 Rapid-Fire salvo" if rapid else "")
                  + (" (Piercing)" if piercing else "")
                  + ". Resolve it with APPLY DAMAGE.", "success")
         self.result_lbl.configure(text=self.result_lbl.cget("text")
@@ -3053,13 +3842,12 @@ class CombatHelperApp:
                          "selected, cost not deducted.", "alert")
             elif not self.pay_for_side(attacker, cost, "bonus damage / Devastating Attack"):
                 return
-        raw = (int_var_value(self.dmg_base_var, 0) + (pa["calibrate"] if pa else 0)
-               + (pa["scan_damage"] if pa else 0) + bonus)
+        raw = int_var_value(self.dmg_base_var, 0) + pending_damage_bonus(pa) + bonus
         label = pa["label"] if pa else (weapon.name if weapon else "Damage")
         source = f"{attacker.name}'s {label}" if attacker else label
         self._inflict_damage(target, raw, self.pierce_var.get(), source, weapon=weapon,
                              choose_system=bool(pa and pa["choose_system"]),
-                             devastating_attack=dev)
+                             devastating_attack=dev, attacker=attacker)
         if pa and pa["ram"] and attacker is not None and attacker is not target:
             recoil = target.scale
             if self.ask_yes_no("Collision recoil",
@@ -3074,16 +3862,16 @@ class CombatHelperApp:
         self.changed()
 
     def _inflict_damage(self, target, raw, piercing, source, weapon=None, choose_system=False,
-                        devastating_attack=False):
-        out = resolve_shield_damage(target.shields, target.shields_max, raw,
+                        devastating_attack=False, attacker=None):
+        out = resolve_shield_damage(target.shields, target.max_shields, raw,
                                     target.effective_resistance, piercing)
         res_txt = "Piercing" if piercing else f"Resistance {out.resistance_applied}"
         target.shields = out.shields_after
         self.log(f"{source} -> {target.name}: {raw} - {res_txt} = {out.final_damage} damage. "
-                 f"Shields {out.shields_before} -> {out.shields_after}/{target.shields_max}.",
+                 f"Shields {out.shields_before} -> {out.shields_after}/{target.max_shields}.",
                  "alert" if out.final_damage else "info")
         if weapon is not None:
-            self._apply_on_hit_qualities(weapon, target)
+            self._apply_on_hit_qualities(weapon, target, attacker, piercing)
         if out.final_damage <= 0:
             self.log(f"{target.name}'s Resistance absorbs the hit - no Shaken or Breach.")
             return out
@@ -3105,7 +3893,7 @@ class CombatHelperApp:
                      f"{target.scale}) - check disabled systems / destruction.", "alert")
         return out
 
-    def _apply_on_hit_qualities(self, weapon, target):
+    def _apply_on_hit_qualities(self, weapon, target, attacker=None, piercing=False):
         if weapon.has("Dampening") and target.reserve_power:
             target.reserve_power = False
             self.log(f"Dampening: {target.name}'s Reserve Power is drained.", "alert")
@@ -3118,10 +3906,7 @@ class CombatHelperApp:
             self.log(f"Slowing: {target.name} cannot Keep the Initiative until End Round.",
                      "alert")
         if weapon.has("Persistent"):
-            x = weapon.qval("Persistent", 1)
-            target.persistent_effects.append({"amount": x, "source": weapon.name})
-            self.log(f"Persistent {x}: {target.name} will take {x} damage at each End Round "
-                     "until fixed with Damage Control.", "alert")
+            self._apply_persistent(weapon, target, attacker, piercing)
         if weapon.has("Area"):
             self.log("Area: other vessels near the target may also be affected - GM adjudicates.")
         if weapon.has("Hidden"):
@@ -3129,6 +3914,30 @@ class CombatHelperApp:
                      f"{weapon.qval('Hidden', 1)} Difficulty.")
         if weapon.has("Calibration"):
             self.log("Calibration: remember any calibration benefits for this weapon.")
+
+    def _apply_persistent(self, weapon, target, attacker, piercing):
+        """2e Persistent: spend 1-3 Momentum for half-damage at each End Round."""
+        per_round = -(-weapon.damage // 2)     # half the damage rating, rounded up
+        payer = "Threat" if attacker is not None and attacker.side == "NPC" else "Momentum"
+        if not piercing and per_round <= target.effective_resistance:
+            self.log(f"Persistent: {per_round} lingering damage would be absorbed by "
+                     f"{target.name}'s Resistance {target.effective_resistance} - not worth "
+                     "spending Momentum.")
+            return
+        options = ["0 - no lingering damage"] + [
+            f"{n} - {per_round} damage at End Round for {n} round(s)" for n in (1, 2, 3)]
+        choice = self.ask_choice(
+            "Persistent", f"{weapon.name} is Persistent. Spend 1-3 {payer} so {target.name} "
+                          f"takes {per_round} damage (Resistance applies) at the end of each "
+                          "round for that many rounds?", options, options[0])
+        rounds = to_int((choice or "0").split(" ")[0], 0)
+        if rounds and (attacker is None
+                       or self.pay_for_side(attacker, rounds, "Persistent damage")):
+            target.persistent_effects.append(
+                {"amount": per_round, "rounds": rounds, "source": weapon.name,
+                 "piercing": bool(piercing)})
+            self.log(f"Persistent: {target.name} will take {per_round} damage at the next "
+                     f"{rounds} End Round(s).", "alert")
 
     def _pick_breach_system(self, target, choose, reason):
         if choose:
@@ -3139,9 +3948,9 @@ class CombatHelperApp:
                 self.log(f"Targeting Solution: system hit chosen -> {sysname}.")
                 self.last_system_hit = sysname
                 return sysname
-        roll, sysname = roll_system_hit(self.rng)
+        roll, sysname = roll_system_hit(self.rng, self.hit_table)
         self.last_system_hit = sysname
-        self.log(f"System Hit roll (d{SYSTEM_HIT_DIE}): {roll} -> {sysname}.")
+        self.log(f"System Hit roll (d{self.hit_table[-1][1]}): {roll} -> {sysname}.")
         return sysname
 
     def _add_breach(self, target, sysname, count, reason, devastating=False):
@@ -3149,7 +3958,8 @@ class CombatHelperApp:
         if devastating and sysname not in target.devastating_systems:
             target.devastating_systems.append(sysname)
         self.log(f"BREACH x{count} on {target.name} {sysname} ({reason})"
-                 + (" [High Yield]" if count > 1 else "") + (" [Devastating]" if devastating else "")
+                 + (" [High Yield]" if count > 1 else "")
+                 + (" [Devastating]" if devastating else "")
                  + f". {sysname} breaches: {target.breaches[sysname]}.", "alert")
 
     def open_shaken_resolver(self, ship, reason):
@@ -3168,6 +3978,9 @@ class CombatHelperApp:
         elif name == "Losing Power!":
             ship.reserve_power = False
             ship.regain_power_penalty = 1
+            if ship.has_talent("Backup EPS Conduits"):
+                self.log(f"Reminder: {ship.name} has Backup EPS Conduits - check whether the "
+                         "talent mitigates this power loss (GM ruling).", "alert")
         elif name == "Casualties and Minor Damage":
             text = self.ask_string("Complication", f"Complication trait for {ship.name}:",
                                    "Casualties and Minor Damage")
@@ -3185,10 +3998,18 @@ class CombatHelperApp:
         t.shaken = True
         self.open_shaken_resolver(t, "opened manually by the GM")
 
+    @property
+    def hit_table(self):
+        return SYSTEM_HIT_TABLES.get(self.hit_table_var.get(), SYSTEM_HIT_TABLE)
+
+    def on_hit_table_change(self):
+        self.log(f"System hit table set to {self.hit_table_var.get()}.")
+        self.changed()
+
     def roll_system_hit_clicked(self):
-        roll, sysname = roll_system_hit(self.rng)
+        roll, sysname = roll_system_hit(self.rng, self.hit_table)
         self.last_system_hit = sysname
-        self.log(f"System Hit Generator (d{SYSTEM_HIT_DIE}): {roll} -> {sysname}.")
+        self.log(f"System Hit Generator (d{self.hit_table[-1][1]}): {roll} -> {sysname}.")
         self.refresh_all()
 
     def breach_last_hit(self):
@@ -3213,6 +4034,55 @@ class CombatHelperApp:
                  "alert" if delta > 0 else "info")
         self.changed()
 
+    def toggle_target_shields(self):
+        t = self.target
+        if t is None:
+            return
+        if self.tgt_shields_up_var.get():
+            self._raise_shields(t)
+        else:
+            self._lower_shields(t)
+        self.changed()
+
+    def _raise_shields(self, ship) -> bool:
+        if not ship.raise_shields():
+            self.log(f"{ship.name} cannot raise shields while cloaked.", "alert")
+            return False
+        self.log(f"{ship.name} raises shields: {ship.shields}/{ship.max_shields}.", "success")
+        return True
+
+    def _lower_shields(self, ship) -> None:
+        if ship.shields_up:
+            ship.lower_shields()
+            self.log(f"{ship.name} lowers shields (Shields count as 0; {ship.stored_shields} "
+                     "restored when raised).", "alert")
+
+    def toggle_target_cloak(self):
+        if self.target is not None:
+            self.toggle_cloak(self.target)
+
+    def toggle_cloak(self, ship=None):
+        ship = ship or self.attacker
+        if ship is None:
+            return
+        if not ship.has_talent("Cloaking Device"):
+            self.show_error("Cloaking Device", f"{ship.name} does not have the Cloaking Device "
+                                               "talent.")
+            return
+        if ship.cloaked:
+            self._decloak(ship)
+        else:
+            ship.engage_cloak()
+            self.log(f"{ship.name} engages its cloaking device: Cloaked trait, Shields 0 and "
+                     "cannot be raised, no attacks until it decloaks. Enemies must Reveal it.",
+                     "alert")
+        self.changed()
+
+    def _decloak(self, ship, reason=""):
+        ship.disengage_cloak()
+        self.log(f"{ship.name} decloaks (Minor Action){reason}. Shields remain DOWN - use "
+                 "Tactical > Prepare to raise them.", "alert")
+
     def toggle_target_flag(self, attr, var):
         t = self.target
         if t is None:
@@ -3221,29 +4091,40 @@ class CombatHelperApp:
         self.log(f"{t.name}: {attr.replace('_', ' ')} -> {'Yes' if var.get() else 'No'}.")
         self.changed()
 
+    def _set_target_shield_value(self, t, value, verb):
+        """Manual GM shield edits; while shields are lowered (or cloaked) the stored value
+        that returns when they are raised is edited instead."""
+        value = clamp(value, 0, t.max_shields)
+        if t.shields_up:
+            t.shields = value
+            self.log(f"GM {verb} {t.name} Shields -> {t.shields}/{t.max_shields}.")
+        else:
+            t.stored_shields = value
+            self.log(f"GM {verb} {t.name}'s lowered Shields -> {value}/{t.max_shields} "
+                     "(applied when raised).")
+        self.changed()
+
+    def _target_shield_value(self, t):
+        if t.shields_up:
+            return t.shields
+        return t.stored_shields if t.stored_shields >= 0 else t.max_shields
+
     def adjust_target_shields(self, delta):
         t = self.target
-        if t is None:
-            return
-        t.shields = clamp(t.shields + delta, 0, t.shields_max)
-        self.log(f"GM adjusts {t.name} Shields {delta:+d} -> {t.shields}/{t.shields_max}.")
-        self.changed()
+        if t is not None:
+            self._set_target_shield_value(t, self._target_shield_value(t) + delta,
+                                          f"adjusts ({delta:+d})")
 
     def set_target_shields(self):
         t = self.target
-        if t is None:
-            return
-        t.shields = clamp(int_var_value(self.tgt_set_shields_var, t.shields), 0, t.shields_max)
-        self.log(f"GM sets {t.name} Shields to {t.shields}/{t.shields_max}.")
-        self.changed()
+        if t is not None:
+            self._set_target_shield_value(
+                t, int_var_value(self.tgt_set_shields_var, self._target_shield_value(t)), "sets")
 
     def restore_target_shields(self):
         t = self.target
-        if t is None:
-            return
-        t.shields = t.shields_max
-        self.log(f"{t.name} Shields restored to {t.shields_max}.")
-        self.changed()
+        if t is not None:
+            self._set_target_shield_value(t, t.max_shields, "restores")
 
     def add_complication(self):
         t = self.target
@@ -3343,13 +4224,15 @@ class CombatHelperApp:
         profile = self.gen_profile_var.get()
         scale = clamp(int_var_value(self.gen_scale_var, 4), 1, 7)
         name = self.gen_name_var.get().strip() or f"NPC {profile.split(' ')[0]} S{scale}"
-        ship = generate_npc_ship(self.unique_name(name), scale, quality, profile, self.rng)
+        ship = generate_npc_ship(self.unique_name(name), scale, quality, profile, self.rng,
+                                 talents=self.gen_talents.selected())
         self.ships.append(ship)
         if self.attacker is not None and self.attacker.side == "Player":
             self.target_var.set(ship.name)
         self.gen_name_var.set("")
         self.log(f"Generated NPC: {ship.name} - Scale {scale}, {quality} crew, Shields "
-                 f"{ship.shields_max}, Resistance {ship.resistance}.")
+                 f"{ship.max_shields}, Resistance {ship.effective_resistance}"
+                 + (f", talents: {', '.join(ship.talents)}" if ship.talents else "") + ".")
         self.changed()
 
     # ============================================================ persistence
@@ -3359,6 +4242,7 @@ class CombatHelperApp:
             "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "round": self.round, "threat": self.threat, "momentum": self.momentum,
             "gm_modifier": int_var_value(self.gm_mod_var, 0),
+            "system_hit_table": self.hit_table_var.get(),
             "attacker": self.attacker_var.get(), "target": self.target_var.get(),
             "ships": [s.to_dict() for s in self.ships],
         }
@@ -3404,6 +4288,8 @@ class CombatHelperApp:
         self.threat = max(0, to_int(meta.get("threat", 0), 0))
         self.momentum = clamp(to_int(meta.get("momentum", 0), 0), 0, MOMENTUM_MAX)
         self.gm_mod_var.set(clamp(to_int(meta.get("gm_modifier", 0), 0), -3, 5))
+        table = meta.get("system_hit_table", DEFAULT_HIT_TABLE)
+        self.hit_table_var.set(table if table in SYSTEM_HIT_TABLES else DEFAULT_HIT_TABLE)
         self.attacker_var.set(str(meta.get("attacker", "")))
         self.target_var.set(str(meta.get("target", "")))
         self.pending_attack = None
@@ -3546,15 +4432,27 @@ class CombatHelperApp:
             txt.insert("end", f"  {lo}-{hi}: {name} - {desc}\n")
         txt.insert("end", "  Shields < 50% or < 25% -> Shaken. Dropping below 25% after "
                           "already being Shaken by the same attack -> Breach instead.\n")
-        txt.insert("end", f"\nSystem Hit Table (d{SYSTEM_HIT_DIE})\n", "h")
-        for lo, hi, s in SYSTEM_HIT_TABLE:
-            txt.insert("end", f"  {lo}-{hi}: {s}\n")
+        for table_name, table in SYSTEM_HIT_TABLES.items():
+            txt.insert("end", f"\nSystem Hit Table - {table_name}\n", "h")
+            for lo, hi, sysname in table:
+                txt.insert("end", f"  {lo}-{hi}: {sysname}\n" if lo != hi
+                           else f"  {lo}: {sysname}\n")
         txt.insert("end", "\nBreach triggers\n", "h")
         txt.insert("end", "  Shields reduced to 0; any damaging hit while Shields are 0; "
                           "< 25% when already Shaken in the same attack. High Yield adds +1.\n")
         txt.insert("end", "\nWeapon Qualities\n", "h")
         for q, (has_x, desc) in WEAPON_QUALITIES.items():
             txt.insert("end", f"  {q}{' X' if has_x else ''}: {desc}\n")
+        txt.insert("end", "\nStarship Talents & Special Rules\n", "h")
+        for t, (kind, desc) in STARSHIP_TALENTS.items():
+            txt.insert("end", f"  {t}{' (Special Rule)' if kind == SPECIAL_RULE else ''}: "
+                              f"{desc}\n")
+        txt.insert("end", "\nCloaking\n", "h")
+        txt.insert("end", "  Cloak: Tactical Major Action, Control + Engineering Diff 2 (assist "
+                          "Engines + Security), needs Reserve Power. Decloak: Minor Action. A "
+                          "cloaked ship has Shields 0 (cannot raise them) and cannot attack. "
+                          "Enemies must Reveal it (Reason + Science, Diff 3) before targeting "
+                          "it, and the Cloaked trait still adds +1 Difficulty.\n")
         txt.insert("end", "\nBridge Stations & Actions\n", "h")
         for station, actions in BRIDGE_STATIONS.items():
             txt.insert("end", f"  {station}\n")
@@ -3566,8 +4464,13 @@ class CombatHelperApp:
         txt.insert("end", "  Total = Base + Weapon modifiers (Cumbersome +1) + context "
                           "(range, Evasive, Jammed, ...) + GM Modifier (-3..+5).\n"
                           "  Bonus d20s: 3rd costs 1, 4th 2, 5th 3 Momentum (NPC: Threat).\n"
-                          "  Opposed tasks: the attacker must reach the Difficulty AND beat the "
-                          "defender's successes (ties favour the defender).\n")
+                          "  Opposed tasks (Evasive Action / Defensive Fire): the defender "
+                          "rolls first; their successes replace the base Difficulty, other "
+                          "modifiers still apply, ties go to the attacker.\n"
+                          "  Attack Pattern: attacks against that ship are -1 Difficulty.\n"
+                          "  Persistent: after a hit spend 1-3 Momentum; the target takes half "
+                          "the weapon damage (rounded up) at each End Round for that many "
+                          "rounds.\n")
         txt.configure(state="disabled")
 
     def show_about(self):

@@ -146,11 +146,16 @@ class DiceTests(unittest.TestCase):
         self.assertTrue(out.success)
         self.assertEqual(out.excess, 0)
 
-    def test_opposed_ties_favour_defender(self):
-        self.assertFalse(outcome_from_successes(3, 2, opposition=3).success)
-        win = outcome_from_successes(4, 2, opposition=3)
-        self.assertTrue(win.success)
-        self.assertEqual(win.excess, 1)
+    def test_opposed_difficulty_replaces_base(self):
+        parts = [("Base (Energy)", 2), ("Weapon mods (Cumbersome)", 1), ("GM Modifier", 0)]
+        self.assertEqual(main.opposed_difficulty(parts, 3), 4)
+        self.assertEqual(main.opposed_difficulty([("Base", 2), ("GM Modifier", -3)], 1), 0)
+
+    def test_opposed_ties_go_to_attacker(self):
+        out = outcome_from_successes(3, 3, opposition=3)
+        self.assertTrue(out.success)
+        self.assertEqual(out.excess, 0)
+        self.assertFalse(outcome_from_successes(2, 3, opposition=3).success)
 
     def test_bonus_dice_cost(self):
         self.assertEqual([bonus_dice_cost(n) for n in (1, 2, 3, 4, 5)], [0, 0, 1, 3, 6])
@@ -217,12 +222,34 @@ class DifficultyTests(unittest.TestCase):
 class ShipStateTests(unittest.TestCase):
     def test_presets(self):
         aurora, warbird = preset_ships()
-        self.assertEqual((aurora.scale, aurora.shields_max, aurora.resistance), (5, 19, 7))
+        self.assertEqual((aurora.scale, aurora.max_shields), (5, 19))
+        self.assertEqual((aurora.base_resistance, aurora.effective_resistance), (5, 7))
         self.assertEqual(aurora.systems["Sensors"], 11)
         self.assertEqual(aurora.departments["Security"], 4)
-        self.assertEqual((warbird.scale, warbird.shields_max, warbird.resistance), (6, 21, 6))
+        self.assertEqual(aurora.tractor_strength_rating, 4)
+        self.assertEqual({w.name: w.damage for w in aurora.weapons},
+                         {"Phaser Arrays": 8, "Photon Torpedoes": 7})
+        self.assertEqual(set(aurora.weapon("Phaser Arrays").qualities),
+                         {"Versatile", "Area", "Spread"})
+        for t in ("Ablative Armor", "Extensive Shuttlebays", "Rapid-Fire Torpedo Launcher",
+                  "Advanced Sensor Suites", "Emergency Medical Hologram", "Experimental Vessel",
+                  "Specialized Shuttlebay"):
+            self.assertTrue(aurora.has_talent(t), t)
+        self.assertEqual((warbird.scale, warbird.max_shields, warbird.effective_resistance),
+                         (6, 21, 6))
         self.assertEqual(warbird.crew_quality, "Talented")
         self.assertEqual(warbird.departments["Command"], 3)
+        self.assertEqual(warbird.tractor_strength_rating, 5)
+        self.assertEqual({w.name: w.damage for w in warbird.weapons},
+                         {"Disruptor Banks": 9, "Plasma Torpedoes": 7})
+        self.assertEqual(set(warbird.weapon("Plasma Torpedoes").qualities),
+                         {"Persistent", "Calibration", "Cumbersome"})
+        for t in ("Cloaking Device", "Electronic Warfare Systems", "Fast Targeting Systems",
+                  "Improved Damage Control", "Reduced Sensor Silhouette", "Secondary Reactors",
+                  "Abundant Personnel"):
+            self.assertTrue(warbird.has_talent(t), t)
+        for t in aurora.talents + warbird.talents:
+            self.assertIn(t, main.STARSHIP_TALENTS)
 
     def test_reset_round_keeps_lasting_state(self):
         s = Ship(name="X", shields=3)
@@ -240,7 +267,9 @@ class ShipStateTests(unittest.TestCase):
     def test_round_trip(self):
         aurora = preset_ships()[0]
         aurora.breaches["Weapons"] = 1
-        aurora.persistent_effects.append({"amount": 2, "source": "Plasma"})
+        aurora.persistent_effects.append({"amount": 4, "rounds": 2, "source": "Plasma",
+                                          "piercing": False})
+        aurora.talents.append("My Custom Talent")
         clone = Ship.from_dict(aurora.to_dict())
         self.assertEqual(clone, aurora)
 
@@ -256,6 +285,17 @@ class ShipStateTests(unittest.TestCase):
         self.assertEqual(ship.systems["Engines"], 8)
         self.assertEqual(ship.weapons[0].wtype, "Torpedo")
         self.assertEqual(ship.weapons[0].qualities, {"Piercing": 0})
+
+    def test_v1_save_migration(self):
+        old = {"name": "Old", "shields_max": 18, "shields": 10, "resistance": 7,
+               "weapons": [{"name": "Plasma", "wtype": "Torpedo", "damage": 7,
+                            "qualities": {"Persistent": 2}}],
+               "persistent_effects": [{"amount": 2, "source": "x"}]}
+        ship = Ship.from_dict(old)
+        self.assertEqual((ship.base_shields, ship.max_shields, ship.shields), (18, 18, 10))
+        self.assertEqual((ship.base_resistance, ship.effective_resistance), (7, 7))
+        self.assertEqual(ship.weapons[0].qualities, {"Persistent": 0})
+        self.assertEqual(ship.persistent_effects[0]["rounds"], 1)
 
     def test_parse_roster_variants(self):
         d = preset_ships()[0].to_dict()
@@ -275,11 +315,110 @@ class ShipStateTests(unittest.TestCase):
                 ship = generate_npc_ship("G", scale, "Proficient", profile, rng)
                 self.assertEqual(ship.scale, scale)
                 self.assertEqual(ship.crew_ratings(), (9, 2))
-                self.assertEqual(ship.shields_max, ship.systems["Structure"]
+                self.assertEqual(ship.base_shields, ship.systems["Structure"]
                                  + ship.departments["Security"] + scale)
+                self.assertEqual(ship.shields, ship.max_shields)
                 self.assertTrue(all(5 <= v <= 14 for v in ship.systems.values()))
                 self.assertTrue(all(0 <= v <= 5 for v in ship.departments.values()))
                 self.assertTrue(ship.weapons)
+
+
+class TalentTests(unittest.TestCase):
+    def test_resistance_and_shield_talents(self):
+        s = Ship(name="T", base_shields=10, shields=10, base_resistance=4)
+        s.talents = ["Ablative Armor", "Improved Hull Integrity", "Advanced Shields"]
+        self.assertEqual(s.effective_resistance, 7)
+        self.assertEqual(s.max_shields, 15)
+        s.resistance_bonus = 2
+        self.assertEqual(s.effective_resistance, 9)
+        self.assertIn("+2 Ablative Armor", s.resistance_text())
+
+    def test_from_dict_clamps_to_effective_max(self):
+        d = Ship(name="T", base_shields=10, shields=15, talents=["Advanced Shields"]).to_dict()
+        self.assertEqual(Ship.from_dict(d).shields, 15)
+        d["talents"] = []
+        self.assertEqual(Ship.from_dict(d).shields, 10)
+
+    def test_cloak_and_shields(self):
+        s = Ship(name="W", base_shields=21, shields=15, talents=["Cloaking Device"])
+        s.engage_cloak()
+        self.assertTrue(s.cloaked)
+        self.assertEqual(s.shields, 0)
+        self.assertFalse(s.raise_shields())
+        self.assertEqual(s.shields, 0)
+        s.disengage_cloak()
+        self.assertFalse(s.shields_up)          # still down after decloaking
+        self.assertTrue(s.raise_shields())
+        self.assertEqual(s.shields, 15)
+        s.lower_shields()
+        self.assertEqual((s.shields, s.stored_shields), (0, 15))
+
+    def test_cloak_dropped_without_talent_on_load(self):
+        d = Ship(name="X", cloaked=True).to_dict()
+        self.assertFalse(Ship.from_dict(d).cloaked)
+
+    def test_derived_pools(self):
+        s = Ship(name="P", scale=5)
+        self.assertEqual((s.crew_support_max, s.small_craft_readiness), (5, 0))
+        s.talents = ["Abundant Personnel", "Extensive Shuttlebays"]
+        self.assertEqual((s.crew_support_max, s.small_craft_readiness), (10, 4))
+        self.assertEqual(s.max_small_craft_scale, 2)
+
+    def test_assist_dice_talents(self):
+        s = Ship(name="S", talents=["Advanced Sensor Suites", "Experimental Vessel"])
+        self.assertEqual(s.ship_assist_dice("Sensors"), 2)
+        self.assertEqual(s.ship_assist_dice("Weapons"), 1)
+        s.breaches["Sensors"] = 1
+        self.assertEqual(s.ship_assist_dice("Sensors"), 1)
+        self.assertEqual(s.assist_complication_from, 18)
+        self.assertTrue(Die(18, 10, 1, "ship", comp_from=18).complication)
+        self.assertFalse(Die(17, 10, 1, "ship", comp_from=18).complication)
+        self.assertFalse(Die(19, 10, 1).complication)
+
+    def test_target_talent_difficulty(self):
+        attacker = Ship(name="A")
+        target = Ship(name="B", talents=["Point Defense System"])
+        torp = Weapon("T", "Torpedo", 6, "Long")
+        fire = action("Tactical", "Fire")
+        total, parts = compute_difficulty("Fire", fire, attacker, torp, target=target)
+        self.assertEqual(total, 4)
+        self.assertIn(("Point Defense (Cover)", 1), parts)
+        target.point_defense_active = False
+        self.assertEqual(compute_difficulty("Fire", fire, attacker, torp, target=target)[0], 3)
+        target.attack_pattern = True
+        self.assertEqual(compute_difficulty("Fire", fire, attacker, torp, target=target)[0], 2)
+        target.talents.append("Cloaking Device")
+        target.cloaked = True
+        self.assertEqual(compute_difficulty("Fire", fire, attacker, torp, target=target)[0], 3)
+        self.assertEqual(compute_difficulty("Fire", fire, attacker, torp, target=attacker)[0], 3)
+
+    def test_reroll_only_failed_dice(self):
+        dice = [Die(3, 13, 3), Die(12, 13, 3)]
+        self.assertIsNone(main.reroll_worst(dice, FixedRng([1])))
+        dice = [Die(3, 13, 3), Die(18, 13, 3)]
+        self.assertEqual(main.reroll_worst(dice, FixedRng([5])), (18, 5))
+
+    def test_system_hit_tables(self):
+        d20 = main.SYSTEM_HIT_TABLE_D20
+        self.assertEqual(system_hit_lookup(1, d20), "Communications")
+        self.assertEqual(system_hit_lookup(6, d20), "Engines")
+        self.assertEqual(system_hit_lookup(17, d20), "Structure")
+        self.assertEqual(system_hit_lookup(20, d20), "Weapons")
+        for table in main.SYSTEM_HIT_TABLES.values():
+            covered = [r for lo, hi, _s in table for r in range(lo, hi + 1)]
+            self.assertEqual(covered, list(range(1, table[-1][1] + 1)))
+
+    def test_pending_damage_bonus(self):
+        self.assertEqual(main.pending_damage_bonus(None), 0)
+        self.assertEqual(main.pending_damage_bonus(
+            {"calibrate": 1, "scan_damage": 2, "rapid_fire": 1}), 4)
+
+    def test_generator_talents(self):
+        ship = generate_npc_ship("G", 4, "Basic", "Warship", random.Random(3),
+                                 talents=["Advanced Shields", "Ablative Armor"])
+        self.assertEqual(ship.max_shields, ship.base_shields + 5)
+        self.assertEqual(ship.shields, ship.max_shields)
+        self.assertEqual(ship.effective_resistance, ship.base_resistance + 2)
 
 
 if __name__ == "__main__":
