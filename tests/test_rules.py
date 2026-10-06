@@ -334,6 +334,55 @@ class ShipStateTests(unittest.TestCase):
                 self.assertTrue(ship.weapons)
 
 
+class MigrationHardeningTests(unittest.TestCase):
+    def test_v1_lowered_shields_are_stored_not_live(self):
+        ship = Ship.from_dict({"name": "Low", "shields_max": 20, "shields": 15,
+                               "resistance": 2, "shields_up": False})
+        self.assertEqual((ship.shields, ship.stored_shields), (0, 15))
+        self.assertTrue(ship.raise_shields())
+        self.assertEqual(ship.shields, 15)
+
+    def test_v1_lowered_at_zero_stays_zero_when_raised(self):
+        ship = Ship.from_dict({"name": "Z", "shields_max": 20, "shields": 0,
+                               "shields_up": False})
+        self.assertEqual(ship.stored_shields, 0)
+        ship.raise_shields()
+        self.assertEqual(ship.shields, 0)
+
+    def test_cloaked_ship_loaded_with_shields_up_is_lowered(self):
+        ship = Ship.from_dict({"name": "C", "base_shields": 21, "shields": 12,
+                               "talents": ["Cloaking Device"], "cloaked": True,
+                               "shields_up": True})
+        self.assertEqual((ship.shields, ship.stored_shields, ship.shields_up), (0, 12, False))
+
+    def test_v1_persistent_keeps_ignoring_resistance(self):
+        ship = Ship.from_dict({"name": "P", "persistent_effects": [{"amount": 2,
+                                                                    "source": "x"}]})
+        self.assertTrue(ship.persistent_effects[0]["piercing"])
+        v2 = Ship.from_dict({"name": "Q", "persistent_effects": [
+            {"amount": 4, "rounds": 2, "source": "y", "piercing": False}]})
+        self.assertFalse(v2.persistent_effects[0]["piercing"])
+
+    def test_string_booleans_and_counter_clamps(self):
+        ship = Ship.from_dict({"name": "S", "scale": 1, "cloaked": "false",
+                               "reserve_power": "no", "crew_support_used": 50,
+                               "small_craft_deployed": 3, "turns_used": -3})
+        self.assertFalse(ship.cloaked)
+        self.assertFalse(ship.reserve_power)
+        self.assertEqual(ship.crew_support_used, ship.crew_support_max)
+        self.assertEqual((ship.small_craft_deployed, ship.turns_used), (0, 0))
+
+    def test_overflow_and_bad_ships_value(self):
+        self.assertEqual(main.to_int(float("inf"), 7), 7)
+        self.assertEqual(main.to_int("1e999", 3), 3)
+        ship = Ship.from_dict({"name": "Big", "base_shields": float("inf")})
+        self.assertEqual(ship.base_shields, 12)
+        with self.assertRaises(ValueError):
+            parse_roster_data({"ships": 5})
+        with self.assertRaises(ValueError):
+            parse_roster_data({"ships": {"name": "x"}})
+
+
 class TalentTests(unittest.TestCase):
     def test_resistance_and_shield_talents(self):
         s = Ship(name="T", base_shields=10, shields=10, base_resistance=4)

@@ -45,7 +45,12 @@ PyInstaller does not cross-compile, so build the `.exe` on Windows.
   single ship), *Export Selected Ship…*, *Export Combat Log…* and *Reset Roster to
   Presets*.
 * Rosters saved by the first version of the app (format 1) still load. Their Shields
-  and Resistance totals become the ships' base values.
+  and Resistance totals become the ships' base values. A ship saved with its shields
+  lowered keeps that value in reserve (it counts as 0 until raised). Old Persistent
+  effects become one End Round tick that still ignores Resistance.
+* Hand-edited files are checked on load: text booleans such as `"false"`, negative or
+  oversized counters, and unknown hit tables are corrected. A file that can't be used
+  at all leaves the current roster untouched (at startup, the presets load instead).
 * If the roster has unsaved changes, the app asks whether to save before it exits.
 
 ## Screen layout

@@ -393,11 +393,25 @@ GENERATOR_PROFILES = {
 def to_int(value, default=0) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         try:
             return int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return default
+
+
+def to_bool(value, default=False) -> bool:
+    """Lenient bool for hand-edited JSON ("false", "0", "no" are False)."""
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("false", "0", "no", "off", ""):
+            return False
+        if text in ("true", "1", "yes", "on"):
+            return True
+        return default
+    if value is None:
+        return default
+    return bool(value)
 
 
 def clamp(value, low, high):
@@ -585,6 +599,13 @@ class Ship:
         if self.stored_shields >= 0:
             self.stored_shields = clamp(self.stored_shields, 0, self.max_shields)
 
+    def normalize(self) -> None:
+        """Keep derived limits consistent after talents / Scale change."""
+        self.clamp_shields()
+        self.crew_support_used = clamp(self.crew_support_used, 0, self.crew_support_max)
+        self.small_craft_deployed = clamp(self.small_craft_deployed, 0,
+                                          self.small_craft_readiness)
+
     def lower_shields(self) -> None:
         """Lowered shields count as 0; the current value is kept for when they are raised."""
         if self.shields_up:
@@ -720,7 +741,7 @@ class Ship:
             default = getattr(ship, f.name)
             value = data[f.name]
             if isinstance(default, bool):
-                value = bool(value)
+                value = to_bool(value, default)
             elif isinstance(default, int):
                 value = to_int(value, default)
             elif isinstance(default, str):
@@ -753,11 +774,17 @@ class Ship:
         ship.base_resistance = max(0, ship.base_resistance)
         ship.tractor_beam = max(0, ship.tractor_beam)
         ship.stored_shields = max(-1, ship.stored_shields)
-        ship.crew_support_used = max(0, ship.crew_support_used)
-        ship.small_craft_deployed = max(0, ship.small_craft_deployed)
+        ship.turns_used = max(0, ship.turns_used)
         if ship.cloaked and not ship.has_talent("Cloaking Device"):
             ship.cloaked = False
-        ship.clamp_shields()
+        if ship.cloaked and ship.shields_up:
+            ship.lower_shields()
+        if not ship.shields_up and (ship.shields > 0 or "stored_shields" not in data):
+            # v1 kept the value live while shields were lowered; v2 stores it.
+            if ship.stored_shields < 0:
+                ship.stored_shields = ship.shields
+            ship.shields = 0
+        ship.normalize()
         ship.breaches = {s: max(0, v) for s, v in ship.breaches.items()}
         ship.devastating_systems = [s for s in ship.devastating_systems if s in SYSTEMS]
         ship.systems_used = [s for s in ship.systems_used if s in SYSTEMS]
@@ -765,7 +792,9 @@ class Ship:
         ship.persistent_effects = [
             {"amount": max(1, to_int(e.get("amount", 1), 1)),
              "rounds": max(1, to_int(e.get("rounds", 1), 1)),
-             "source": str(e.get("source", "?")), "piercing": bool(e.get("piercing", False))}
+             "source": str(e.get("source", "?")),
+             # v1 effects (no "rounds") ignored Resistance; keep that when migrating.
+             "piercing": to_bool(e.get("piercing", "rounds" not in e))}
             for e in ship.persistent_effects if isinstance(e, dict)]
         if ship.weakness_scanned not in ("", "damage", "piercing"):
             ship.weakness_scanned = ""
@@ -858,11 +887,13 @@ def parse_roster_data(data) -> tuple:
         entries = [data]
     else:
         raise ValueError("Unrecognised file: expected a roster with a 'ships' list.")
+    if not isinstance(entries, list):
+        raise ValueError("'ships' must be a list.")
     ships, errors = [], []
     for i, entry in enumerate(entries, 1):
         try:
             ships.append(Ship.from_dict(entry))
-        except (ValueError, TypeError, AttributeError) as exc:
+        except (ValueError, TypeError, AttributeError, OverflowError) as exc:
             errors.append(f"entry {i}: {exc}")
     return ships, meta, errors
 
@@ -1419,6 +1450,7 @@ class TalentPicker(ttk.Frame):
             self.lb.insert("end", self._label(name))
         for name in selected:
             self.lb.selection_set(self.names.index(name))
+        self._prev = set(self.lb.curselection())
         self.lb.bind("<<ListboxSelect>>", self._changed)
         self.info = ttk.Label(self, text="Click a talent to see its rule.", wraplength=260,
                               justify="left", style="Info.TLabel")
@@ -1439,11 +1471,13 @@ class TalentPicker(ttk.Frame):
         return name + ("  (Special Rule)" if talent_kind(name) == SPECIAL_RULE else "")
 
     def _changed(self, _event=None):
-        sel = self.lb.curselection()
-        active = self.lb.index("active")
-        name = self.names[active] if 0 <= active < len(self.names) else None
-        if name:
-            self.info.configure(text=f"{name}: {talent_text(name)}")
+        sel = set(self.lb.curselection())
+        changed = sel ^ self._prev
+        self._prev = sel
+        if changed:
+            name = self.names[min(changed)]
+            state = "selected" if min(changed) in sel else "removed"
+            self.info.configure(text=f"{name} ({state}): {talent_text(name)}")
         if self.on_change:
             self.on_change()
         return sel
@@ -1464,7 +1498,10 @@ class TalentPicker(ttk.Frame):
 
     def clear(self):
         self.lb.selection_clear(0, "end")
-        self._changed()
+        self._prev = set()
+        self.info.configure(text="Click a talent to see its rule.")
+        if self.on_change:
+            self.on_change()
 
 
 class ShipEditor(tk.Toplevel):
@@ -1687,7 +1724,7 @@ class ShipEditor(tk.Toplevel):
             ship.disengage_cloak()
         if self.is_new or (was_full and ship.shields_up):
             ship.shields = ship.max_shields if ship.shields_up else 0
-        ship.clamp_shields()
+        ship.normalize()
         self.result = ship
         self.destroy()
 
@@ -1810,7 +1847,7 @@ class CombatHelperApp:
         for var in (self.gm_mod_var, self.weapon_var, self.salvo_var, self.range_var,
                     self.tsol_mode_var, self.scan_mode_var, self.regen_boost_var,
                     self.crew_attr_var, self.crew_dept_var, self.focus_var, self.dice_var,
-                    self.autopay_var, self.assist_var, self.mode_var):
+                    self.autopay_var, self.assist_var, self.mode_var, self.opp_var):
             var.trace_add("write", lambda *_a: self._on_option_change())
         for var in (self.dmg_base_var, self.dmg_bonus_var, self.pierce_var, self.devastate_var):
             var.trace_add("write", lambda *_a: self._on_damage_option_change())
@@ -2788,8 +2825,24 @@ class CombatHelperApp:
                                        else "ROLL & RESOLVE")
 
         total, parts = self.compute_current_difficulty()
-        self.diff_total_lbl.configure(text="-" if total is None else str(total))
-        self.diff_parts_lbl.configure(text=format_difficulty(total, parts))
+        if defense and total is not None:
+            mods = format_difficulty(sum(v for _l, v in parts[1:]), parts[1:]) if parts[1:] \
+                else "no modifiers"
+            if manual:
+                total = opposed_difficulty(parts, int_var_value(self.opp_var, 0))
+                self.diff_total_lbl.configure(text=str(total))
+                self.diff_parts_lbl.configure(
+                    text=f"OPPOSED: defender's {int_var_value(self.opp_var, 0)} success(es) "
+                         f"replace the base; modifiers: {mods}")
+            else:
+                self.diff_total_lbl.configure(text="?")
+                self.diff_parts_lbl.configure(
+                    text=f"OPPOSED: defender rolls first, their successes replace the base "
+                         f"Difficulty; modifiers: {mods}")
+                total = None     # unknown until the defender rolls
+        else:
+            self.diff_total_lbl.configure(text="-" if total is None else str(total))
+            self.diff_parts_lbl.configure(text=format_difficulty(total, parts))
         dice = int_var_value(self.dice_var, 2)
         cost = bonus_dice_cost(dice)
         payer = "Threat" if ship is not None and ship.side == "NPC" else "Momentum"
@@ -3185,6 +3238,9 @@ class CombatHelperApp:
                 f"{out.shields_before} -> {out.shields_after}/{t.max_shields}")
         consequences = [f"SHAKEN ({r})" for r in out.shaken_reasons]
         consequences += [f"BREACH ({r})" for r in out.breach_reasons]
+        if self.devastate_var.get():
+            consequences.append("Devastating Attack: +1 breach" if out.final_damage > 0
+                                else "Devastating Attack: no effect (0 damage, not charged)")
         if consequences:
             text += "\nPredicted: " + "; ".join(consequences)
         self.dmg_preview_lbl.configure(text=text)
@@ -3210,11 +3266,13 @@ class CombatHelperApp:
         if ship is None:
             return
         limit = ship.crew_support_max if attr == "crew_support_used" else ship.small_craft_readiness
-        new = clamp(getattr(ship, attr) + delta, 0, limit)
+        current = getattr(ship, attr)
         pool = "Crew Support" if attr == "crew_support_used" else "Small Craft Readiness"
-        if new == getattr(ship, attr):
-            if delta > 0:
-                self.log(f"{ship.name}: no {pool} left.", "alert")
+        if delta > 0 and current >= limit:
+            self.log(f"{ship.name}: no {pool} left.", "alert")
+            return
+        new = clamp(current + delta, 0, max(limit, current))
+        if new == current:
             return
         setattr(ship, attr, new)
         label = "Crew Support used" if attr == "crew_support_used" else "Small craft deployed"
@@ -3278,7 +3336,10 @@ class CombatHelperApp:
             return
         difficulty, parts = self.compute_current_difficulty()
         if not self._pay_action_costs(ship, name, adef, weapon, reuse_threat):
+            self.refresh_all()
             return
+        if ship.cloaked and name in HOSTILE_ACTIONS:   # the GM agreed to decloak in precheck
+            self._decloak(ship, f" to use {name}")
         outcome = None
         if adef["roll"]:
             outcome = self._perform_task(ship, name, adef, target, difficulty, weapon, parts)
@@ -3368,12 +3429,10 @@ class CombatHelperApp:
                                       "\n\nProceed anyway (GM override)?"):
                 return None
             self.log(f"GM override: {ship.name} targets the cloaked {target.name}.", "alert")
-        if ship.cloaked and name in HOSTILE_ACTIONS:
-            if not self.ask_yes_no(
-                    "Cloaked", f"{ship.name} is cloaked and cannot attack or use its tractor "
-                               "beam.\n\nDecloak now (Minor Action) and continue?"):
-                return None
-            self._decloak(ship, f" to use {name}")
+        if ship.cloaked and name in HOSTILE_ACTIONS and not self.ask_yes_no(
+                "Cloaked", f"{ship.name} is cloaked and cannot attack or use its tractor "
+                           "beam.\n\nDecloak now (Minor Action) and continue?"):
+            return None
         return reuse_threat
 
     def _pay_action_costs(self, ship, name, adef, weapon, reuse_threat) -> bool:
@@ -3444,6 +3503,7 @@ class CombatHelperApp:
         n = clamp(int_var_value(self.dice_var, 2), 1, MAX_DICE_POOL)
         manual = self.mode_var.get() == "manual"
         opposition = None
+        defender_comps = 0
         defense = self._defense_mode(target) if (adef["attack"] and target is not None) else None
         if defense:
             if manual:
@@ -3452,8 +3512,15 @@ class CombatHelperApp:
             else:
                 opp_out, desc = self._roll_defense(target, defense)
                 opposition = opp_out.successes
+                defender_comps = opp_out.complications
                 self.opp_var.set(opposition)
                 self.log(desc)
+                if defender_comps:
+                    self.log(f"{target.name}: {defender_comps} complication(s) on its defence "
+                             "roll" + (f" (ship dice complicate on "
+                                       f"{target.assist_complication_from}-20)"
+                                       if target.assist_complication_from < 20 else "")
+                             + " - GM: add a complication or let them buy it off.", "alert")
             difficulty = opposed_difficulty(parts or [("Base", 0)], opposition)
             self.log(f"Opposed task: Difficulty = defender's {opposition} success(es) + "
                      f"modifiers = {difficulty}.")
@@ -3524,6 +3591,8 @@ class CombatHelperApp:
         detail = f"[{dice_text}]" + (f"  ({'; '.join(notes)})" if notes else "")
         if outcome.complications:
             summary += f"\n{outcome.complications} COMPLICATION(S) rolled!"
+        if defender_comps:
+            summary += f"\nDefender rolled {defender_comps} COMPLICATION(S)!"
         self.result_lbl.configure(text=f"{summary}\n{detail}",
                                   style="Good.TLabel" if outcome.success else "Alert.TLabel")
         self.log(f"{ship.name}: {name} - {summary.splitlines()[0]} {detail}",
@@ -3728,12 +3797,13 @@ class CombatHelperApp:
             if (sysname and remaining and ship.has_talent("Rugged Design")
                     and self.ask_yes_no("Rugged Design",
                                         f"Rugged Design: spend 2 {payer} to patch a second "
-                                        f"breach on {ship.name}?")
-                    and self.pay_for_side(ship, 2, "Rugged Design second patch")):
+                                        f"breach on {ship.name}?")):
                 second = remaining[0] if len(remaining) == 1 else self.ask_choice(
                     "Rugged Design", "Patch a second breach on which system?", remaining,
                     remaining[0])
-                if second:
+                if not second:
+                    self.log("Rugged Design second patch cancelled - nothing spent.")
+                elif self.pay_for_side(ship, 2, "Rugged Design second patch"):
                     self._patch_breach(ship, second, "Rugged Design")
         else:
             self.log(f"{ship.name}: Damage Control - no breaches to patch.")
@@ -3842,6 +3912,13 @@ class CombatHelperApp:
             attacker = None   # e.g. GM applying hazard damage to the acting ship
         bonus = int_var_value(self.dmg_bonus_var, 0)
         dev = self.devastate_var.get()
+        raw = int_var_value(self.dmg_base_var, 0) + pending_damage_bonus(pa) + bonus
+        if dev and resolve_shield_damage(target.shields, target.max_shields, raw,
+                                         target.effective_resistance,
+                                         self.pierce_var.get()).final_damage <= 0:
+            dev = False
+            self.log("Devastating Attack not applied - the hit is fully absorbed, so no cost "
+                     "is charged.", "alert")
         cost = bonus * bonus_damage_cost_each(weapon) + (devastating_attack_cost(weapon) if dev
                                                          else 0)
         if cost:
@@ -3850,7 +3927,6 @@ class CombatHelperApp:
                          "selected, cost not deducted.", "alert")
             elif not self.pay_for_side(attacker, cost, "bonus damage / Devastating Attack"):
                 return
-        raw = int_var_value(self.dmg_base_var, 0) + pending_damage_bonus(pa) + bonus
         label = pa["label"] if pa else (weapon.name if weapon else "Damage")
         source = f"{attacker.name}'s {label}" if attacker else label
         self._inflict_damage(target, raw, self.pierce_var.get(), source, weapon=weapon,
@@ -3927,11 +4003,14 @@ class CombatHelperApp:
         """2e Persistent: spend 1-3 Momentum for half-damage at each End Round."""
         per_round = -(-weapon.damage // 2)     # half the damage rating, rounded up
         payer = "Threat" if attacker is not None and attacker.side == "NPC" else "Momentum"
-        if not piercing and per_round <= target.effective_resistance:
+        lasting = target.effective_resistance - target.resistance_bonus
+        if not piercing and per_round <= lasting:
             self.log(f"Persistent: {per_round} lingering damage would be absorbed by "
-                     f"{target.name}'s Resistance {target.effective_resistance} - not worth "
-                     "spending Momentum.")
+                     f"{target.name}'s Resistance {lasting} - not worth spending {payer}.")
             return
+        if not piercing and per_round <= target.effective_resistance:
+            self.log(f"Persistent: the tick at this End Round is absorbed by Modulated Shields; "
+                     f"later ticks face Resistance {lasting}.", "alert")
         options = ["0 - no lingering damage"] + [
             f"{n} - {per_round} damage at End Round for {n} round(s)" for n in (1, 2, 3)]
         choice = self.ask_choice(
@@ -4278,7 +4357,17 @@ class CombatHelperApp:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             ships, meta, errors = parse_roster_data(data)
-        except (OSError, ValueError) as exc:
+            # Validate everything before touching the current roster.
+            round_ = max(1, to_int(meta.get("round", 1), 1))
+            threat = max(0, to_int(meta.get("threat", 0), 0))
+            momentum = clamp(to_int(meta.get("momentum", 0), 0), 0, MOMENTUM_MAX)
+            gm_mod = clamp(to_int(meta.get("gm_modifier", 0), 0), -3, 5)
+            table = meta.get("system_hit_table", DEFAULT_HIT_TABLE)
+            if not isinstance(table, str) or table not in SYSTEM_HIT_TABLES:
+                table = DEFAULT_HIT_TABLE
+            attacker = meta.get("attacker", "")
+            target = meta.get("target", "")
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
             if not quiet:
                 self.show_error("Load failed", f"Could not load roster from\n{path}\n\n{exc}")
             else:
@@ -4292,14 +4381,11 @@ class CombatHelperApp:
         for ship in ships:            # guarantee unique names
             ship.name = self.unique_name(ship.name)
             self.ships.append(ship)
-        self.round = max(1, to_int(meta.get("round", 1), 1))
-        self.threat = max(0, to_int(meta.get("threat", 0), 0))
-        self.momentum = clamp(to_int(meta.get("momentum", 0), 0), 0, MOMENTUM_MAX)
-        self.gm_mod_var.set(clamp(to_int(meta.get("gm_modifier", 0), 0), -3, 5))
-        table = meta.get("system_hit_table", DEFAULT_HIT_TABLE)
-        self.hit_table_var.set(table if table in SYSTEM_HIT_TABLES else DEFAULT_HIT_TABLE)
-        self.attacker_var.set(str(meta.get("attacker", "")))
-        self.target_var.set(str(meta.get("target", "")))
+        self.round, self.threat, self.momentum = round_, threat, momentum
+        self.gm_mod_var.set(gm_mod)
+        self.hit_table_var.set(table)
+        self.attacker_var.set(attacker if isinstance(attacker, str) else "")
+        self.target_var.set(target if isinstance(target, str) else "")
         self.pending_attack = None
         self._last_attacker = None
         self.dirty = os.path.abspath(path) != os.path.abspath(self.data_file)
@@ -4375,7 +4461,7 @@ class CombatHelperApp:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 ships, _meta, errors = parse_roster_data(json.load(fh))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
             self.show_error("Import failed", f"Could not import from\n{path}\n\n{exc}")
             return
         for ship in ships:
