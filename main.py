@@ -1,0 +1,3597 @@
+#!/usr/bin/env python3
+"""
+STA 2e Combat Helper
+====================
+
+A Gamemaster helper for Star Trek Adventures 2nd Edition starship combat:
+bridge stations and actions, dynamic task Difficulty, dice resolution,
+damage / Shaken / breach handling, turn budgets and roster persistence.
+
+Run from source:
+    python main.py
+
+Build a single Windows executable (run on Windows):
+    pip install pyinstaller
+    pyinstaller --onefile --windowed --name STA2e_Combat_Helper main.py
+    -> dist/STA2e_Combat_Helper.exe
+
+Only the Python standard library is used (tkinter / ttk).
+"""
+
+from __future__ import annotations
+
+import copy
+import datetime
+import json
+import os
+import random
+import sys
+from dataclasses import asdict, dataclass, field, fields
+
+import tkinter as tk
+import tkinter.font as tkfont
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter.scrolledtext import ScrolledText
+
+APP_NAME = "STA 2e Combat Helper"
+APP_VERSION = "1.0.0"
+SAVE_FORMAT_VERSION = 1
+
+
+def app_dir() -> str:
+    """Folder that holds the app: next to the .exe when frozen, else next to main.py."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+DATA_FILE = os.path.join(app_dir(), "sta2e_ships.json")
+
+# =============================================================================
+# Domain data (STA 2nd Edition)
+# =============================================================================
+
+SYSTEMS = ["Communications", "Computers", "Engines", "Sensors", "Structure", "Weapons"]
+SYSTEM_ABBR = {"Communications": "Comms", "Computers": "Comp", "Engines": "Eng",
+               "Sensors": "Sens", "Structure": "Struct", "Weapons": "Weap"}
+DEPARTMENTS = ["Command", "Conn", "Engineering", "Security", "Medicine", "Science"]
+SIDES = ["Player", "NPC"]
+RANGES = ["Contact", "Close", "Medium", "Long", "Extreme"]
+WEAPON_RANGES = ["Close", "Medium", "Long"]
+WEAPON_TYPES = ["Energy", "Torpedo"]
+CUSTOM_WEAPON = "Custom / Other"
+
+MOMENTUM_MAX = 6
+ENERGY_BASE_DIFFICULTY = 2
+TORPEDO_BASE_DIFFICULTY = 3
+MAX_DICE_POOL = 5
+
+# Crew Quality -> (Attribute, Department) used for NPC crew rolls.
+CREW_QUALITY = {
+    "Basic": (8, 1),
+    "Proficient": (9, 2),
+    "Talented": (10, 3),
+    "Exceptional": (11, 4),
+}
+DEFAULT_CREW_QUALITY = "Talented"
+
+# Minor Damage table rolled when a ship becomes Shaken (d20).
+MINOR_DAMAGE_TABLE = [
+    (1, 6, "Brace for Impact!",
+     "The ship cannot take a Major Action on its next turn."),
+    (7, 12, "Losing Power!",
+     "Reserve Power is drained. The next attempt to Regain Power is +1 Difficulty."),
+    (13, 18, "Casualties and Minor Damage",
+     "The ship immediately suffers a Complication trait."),
+    (19, 20, "Re-roll", "Roll again on this table."),
+]
+MINOR_DAMAGE_REROLL = "Re-roll"
+
+# Random system hit table: (low, high, system). The die size is the top value.
+SYSTEM_HIT_TABLE = [
+    (1, 2, "Communications"),
+    (3, 4, "Computers"),
+    (5, 6, "Engines"),
+    (7, 8, "Sensors"),
+    (9, 10, "Structure"),
+    (11, 12, "Weapons"),
+]
+SYSTEM_HIT_DIE = SYSTEM_HIT_TABLE[-1][1]
+
+# Weapon qualities: name -> (takes an X value, reminder text)
+WEAPON_QUALITIES = {
+    "Area": (False, "Attack can also affect other vessels close to the target - resolve "
+                    "extra targets per the rulebook."),
+    "Calibration": (False, "Weapon has calibration benefits - remember to apply them when "
+                           "Calibrate Weapons / Targeting Solution was used."),
+    "Cumbersome": (False, "+1 Difficulty to attacks with this weapon (auto-applied)."),
+    "Dampening": (False, "On a hit, the target's Reserve Power is drained (auto-applied)."),
+    "Depleting": (False, "Increasing damage costs only 1 Momentum per +1 (auto-applied)."),
+    "Devastating": (False, "Breaches caused are harder to fix: +1 Difficulty to Damage "
+                           "Control on that ship (auto-tracked)."),
+    "Hidden": (True, "Attack is concealed: detecting/locating the attacker is +X "
+                     "Difficulty."),
+    "High Yield": (False, "+1 additional Breach whenever this attack triggers a Breach "
+                          "(auto-applied)."),
+    "Intense": (False, "Increasing damage costs only 1 Momentum per +1 (auto-applied)."),
+    "Jamming": (False, "On a hit, the target has +1 Difficulty to Communications/Sensors "
+                       "tasks until End Round (auto-applied)."),
+    "Persistent": (True, "On a hit, the target suffers X damage (ignoring Resistance) at "
+                         "every End Round until fixed with Damage Control (auto-applied)."),
+    "Piercing": (False, "Ignores the target's Resistance (auto-applied)."),
+    "Slowing": (False, "On a hit, the target cannot Keep the Initiative until End Round "
+                       "(auto-flagged)."),
+    "Spread": (False, "Devastating Attack costs only 1 Momentum (auto-applied)."),
+    "Versatile": (True, "On a successful attack, gain X bonus Momentum (NPC: Threat) "
+                        "(auto-applied)."),
+}
+
+BONUS_DAMAGE_COST = 2          # Momentum per +1 damage (1 with Intense/Depleting)
+DEVASTATING_ATTACK_COST = 2    # Momentum (1 with Spread)
+
+
+def _action(kind, system, *, roll=True, attr=None, dept=None, assist=None, base=0,
+            reminder="", attack=False, needs_target=False, range_penalty=False,
+            requires_power=False, sensor=False, task_label="Task"):
+    return {
+        "kind": kind, "system": system, "roll": roll, "attr": attr, "dept": dept,
+        "task_label": task_label,
+        "assist": assist, "base": base, "reminder": reminder, "attack": attack,
+        "needs_target": needs_target, "range_penalty": range_penalty,
+        "requires_power": requires_power, "sensor": sensor,
+    }
+
+
+# Station -> Action -> definition.
+#   system: ship system the action draws on (used for the NPC "re-use" check).
+#   assist: (System, Department) the ship rolls when it assists the task.
+BRIDGE_STATIONS = {
+    "Command": {
+        "Direct": _action(
+            "Major", "Communications", roll=False, attr="Control", dept="Command",
+            task_label="Commander's assist die", reminder="Costs 1 Momentum (NPC: 1 Threat). Choose an ally: they immediately take "
+                     "a Major Action WITHOUT the usual +1 Difficulty penalty. The commander "
+                     "assists that task using Control + Command."),
+        "Rally": _action(
+            "Major", "Communications", attr="Presence", dept="Command",
+            assist=("Communications", "Command"), base=0,
+            reminder="Difficulty 0 task used specifically to generate Momentum: every success "
+                     "scored becomes Momentum (NPC: Threat)."),
+        "Assist": _action(
+            "Major", "Communications", roll=False,
+            reminder="The commander may assist TWO allies' tasks instead of one. Each assist "
+                     "die uses the commander's own Attribute + Department for that task."),
+    },
+    "Conn / Helm": {
+        "Impulse": _action(
+            "Minor", "Engines", roll=False,
+            reminder="Move up to 2 zones. Minor Action - does not use a turn."),
+        "Thrusters": _action(
+            "Minor", "Engines", roll=False,
+            reminder="Move anywhere within Close range, or into Contact with another "
+                     "vessel or object. Minor Action - does not use a turn."),
+        "Attack Pattern": _action(
+            "Major", "Engines", attr="Control", dept="Conn", assist=("Engines", "Conn"),
+            base=1,
+            reminder="On success the helm assists ALL of this ship's attacks until its next "
+                     "turn (adds a Control + Conn assist die to Fire / Ram). Cleared at End "
+                     "Round."),
+        "Evasive Action": _action(
+            "Major", "Structure", roll=False, attr="Daring", dept="Conn",
+            assist=("Structure", "Conn"), task_label="Defence roll when attacked",
+            reminder="Until End Round: attacks against this ship become Opposed Tasks "
+                     "(defender rolls Daring + Conn, assisted by Structure + Conn). Attacks "
+                     "made BY this ship suffer +1 Difficulty."),
+        "Maneuver": _action(
+            "Major", "Engines", attr="Control", dept="Conn", assist=("Engines", "Conn"),
+            base=0,
+            reminder="Difficulty 0 task that generates Momentum for crossing difficult "
+                     "terrain or hazards. Every success becomes Momentum (NPC: Threat)."),
+        "Ram": _action(
+            "Major", "Engines", attr="Daring", dept="Conn", assist=("Engines", "Conn"),
+            base=2, attack=True, needs_target=True,
+            reminder="Target must be within Close range. On success BOTH ships suffer "
+                     "collision damage - resolve it in the Damage Resolver (suggested damage "
+                     "is pre-filled; the GM may edit it)."),
+        "Warp": _action(
+            "Major", "Engines", attr="Control", dept="Conn", assist=("Engines", "Conn"),
+            base=1, requires_power=True,
+            reminder="Requires Reserve Power and a prior Prepare (Warp) minor action. On "
+                     "success move up to the ship's Engines score in zones, or leave the "
+                     "battle. Reserve Power is consumed by the attempt."),
+    },
+    "Tactical": {
+        "Prepare": _action(
+            "Minor", "Weapons", roll=False,
+            reminder="Raise / lower shields, arm / disarm weapons, or prepare for Warp. "
+                     "Minor Action - does not use a turn."),
+        "Calibrate Weapons": _action(
+            "Minor", "Weapons", roll=False,
+            reminder="The next attack made with this ship's weapons gains +1 Damage."),
+        "Targeting Solution": _action(
+            "Minor", "Weapons", roll=False,
+            reminder="Target an enemy within Long range. The next attack may re-roll 1d20 "
+                     "OR choose which system is hit (pick the benefit when you Fire)."),
+        "Fire": _action(
+            "Major", "Weapons", attr="Control", dept="Security", assist=("Weapons", "Security"),
+            base=ENERGY_BASE_DIFFICULTY, attack=True, needs_target=True,
+            reminder="Energy weapons: Difficulty 2. Torpedoes: Difficulty 3 and +1 Threat "
+                     "(Salvo: +3 Threat; NPCs spend Threat instead). Cumbersome: +1 "
+                     "Difficulty. On a hit, resolve damage in the Tactical panel."),
+        "Defensive Fire": _action(
+            "Major", "Weapons", roll=False, attr="Daring", dept="Security",
+            assist=("Weapons", "Security"), task_label="Defence roll when attacked",
+            reminder="Until End Round: attacks against this ship become Opposed Tasks "
+                     "(defender rolls Daring + Security, assisted by Weapons + Security)."),
+        "Modulate Shields": _action(
+            "Major", "Structure", roll=False,
+            reminder="The ship's Resistance increases by +2 until End Round."),
+        "Tractor Beam": _action(
+            "Major", "Structure", attr="Control", dept="Security",
+            assist=("Structure", "Security"), base=2, needs_target=True,
+            reminder="Target within Close range. On success the target is immobilised; the "
+                     "tractor beam has Strength = this ship's Scale - 1."),
+    },
+    "Sensor Operations": {
+        "Calibrate Sensors": _action(
+            "Minor", "Sensors", roll=False,
+            reminder="The next Sensor Operations task may ignore 1 trait OR re-roll 1d20 "
+                     "(auto-roll re-rolls the worst die)."),
+        "Launch Probe": _action(
+            "Minor", "Sensors", roll=False,
+            reminder="Launch a probe anywhere within Long range."),
+        "Sensor Sweep": _action(
+            "Major", "Sensors", attr="Reason", dept="Science", assist=("Sensors", "Science"),
+            base=1, range_penalty=True, sensor=True,
+            reminder="Base Difficulty 1, +1 for each range category beyond Close."),
+        "Scan for Weakness": _action(
+            "Major", "Sensors", attr="Control", dept="Science", assist=("Sensors", "Security"),
+            base=2, range_penalty=True, sensor=True, needs_target=True,
+            reminder="Base Difficulty 2, +1 for each range category beyond Close. Success: "
+                     "the next attack against the target gains +2 Damage OR Piercing."),
+        "Reveal": _action(
+            "Major", "Sensors", attr="Reason", dept="Science", assist=("Sensors", "Science"),
+            base=3, sensor=True,
+            reminder="Reveal a cloaked or hidden vessel within Long range."),
+    },
+    "Operations / Engineering": {
+        "Damage Control": _action(
+            "Major", "Structure", attr="Presence", dept="Engineering",
+            assist=("Structure", "Engineering"), base=2,
+            reminder="Success: patch 1 breach (also extinguishes one Persistent effect). "
+                     "Breaches from Devastating weapons add +1 Difficulty."),
+        "Regenerate Shields": _action(
+            "Major", "Structure", attr="Control", dept="Engineering",
+            assist=("Structure", "Engineering"), base=2, requires_power=True,
+            reminder="Requires Reserve Power (consumed). Difficulty 2, +1 if Shields are at 0. "
+                     "Success: restore Shields equal to the Engineering rating; spend 1 "
+                     "Momentum for +2 more."),
+        "Regain Power": _action(
+            "Major", "Engines", attr="Control", dept="Engineering",
+            assist=("Engines", "Engineering"), base=1,
+            reminder="Success: Reserve Power is restored. +1 Difficulty after 'Losing Power!'."),
+        "Reroute Power": _action(
+            "Major", "Engines", roll=False, requires_power=True,
+            reminder="Requires Reserve Power (consumed). Choose a system: the next task using "
+                     "that system receives the Reserve Power boost."),
+        "Transport": _action(
+            "Major", "Sensors", attr="Control", dept="Engineering",
+            assist=("Sensors", "Engineering"), base=2,
+            reminder="Remote transporter operation. Difficulty varies with circumstances "
+                     "(default 2 - use the GM Modifier). Shields usually must be lowered."),
+    },
+}
+
+GENERATOR_PROFILES = {
+    # profile -> (system modifiers, department weights)
+    "Balanced": ({}, {}),
+    "Warship": ({"Weapons": 2, "Structure": 1, "Computers": -1, "Communications": -1},
+                {"Security": 2, "Conn": 1}),
+    "Science / Survey": ({"Sensors": 2, "Computers": 1, "Weapons": -2},
+                         {"Science": 2, "Engineering": 1}),
+    "Escort / Raider": ({"Engines": 2, "Weapons": 1, "Structure": -1, "Communications": -1},
+                        {"Conn": 2, "Security": 1}),
+    "Freighter / Civilian": ({"Structure": 1, "Engines": -1, "Weapons": -3},
+                             {"Engineering": 2, "Command": 1}),
+}
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def to_int(value, default=0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+# =============================================================================
+# Data model
+# =============================================================================
+
+@dataclass
+class Weapon:
+    name: str = "Phaser Banks"
+    wtype: str = "Energy"
+    damage: int = 4
+    range: str = "Medium"
+    qualities: dict = field(default_factory=dict)   # quality -> X value (0 if none)
+
+    def has(self, quality: str) -> bool:
+        return quality in self.qualities
+
+    def qval(self, quality: str, default: int = 1) -> int:
+        value = to_int(self.qualities.get(quality, default), default)
+        return value if value > 0 else default
+
+    def quality_text(self) -> str:
+        parts = []
+        for q, v in self.qualities.items():
+            parts.append(f"{q} {v}" if WEAPON_QUALITIES.get(q, (False,))[0] else q)
+        return ", ".join(parts)
+
+    def describe(self) -> str:
+        q = self.quality_text()
+        return f"{self.name} ({self.wtype}, {self.range}, Dmg {self.damage}{'; ' + q if q else ''})"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Weapon":
+        quals = data.get("qualities", {})
+        if isinstance(quals, list):
+            quals = {q: 0 for q in quals}
+        if not isinstance(quals, dict):
+            quals = {}
+        quals = {str(k): to_int(v, 0) for k, v in quals.items() if k in WEAPON_QUALITIES}
+        wtype = str(data.get("wtype", data.get("type", "Energy")))
+        rng = str(data.get("range", "Medium"))
+        return cls(
+            name=str(data.get("name", "Weapon")).strip() or "Weapon",
+            wtype=wtype if wtype in WEAPON_TYPES else "Energy",
+            damage=max(0, to_int(data.get("damage", 4), 4)),
+            range=rng if rng in WEAPON_RANGES else "Medium",
+            qualities=quals,
+        )
+
+
+@dataclass
+class Ship:
+    name: str
+    ship_class: str = ""
+    side: str = "NPC"
+    scale: int = 4
+    crew_quality: str = DEFAULT_CREW_QUALITY
+    shields_max: int = 12
+    shields: int = 12
+    resistance: int = 4
+    systems: dict = field(default_factory=lambda: {s: 8 for s in SYSTEMS})
+    departments: dict = field(default_factory=lambda: {d: 2 for d in DEPARTMENTS})
+    weapons: list = field(default_factory=list)
+    notes: str = ""
+    # --- lasting combat state ---------------------------------------------
+    reserve_power: bool = True
+    shields_up: bool = True
+    weapons_armed: bool = True
+    warp_prepared: bool = False
+    breaches: dict = field(default_factory=lambda: {s: 0 for s in SYSTEMS})
+    devastating_systems: list = field(default_factory=list)
+    complications: list = field(default_factory=list)
+    persistent_effects: list = field(default_factory=list)   # [{"amount": int, "source": str}]
+    tractored_by: str = ""
+    tractor_strength: int = 0
+    rerouted_power: str = ""
+    # --- "next time" effects (consumed when used) -------------------------
+    calibrated_weapons: bool = False
+    targeting_solution: bool = False
+    calibrated_sensors: bool = False
+    weakness_scanned: str = ""          # "", "damage" or "piercing"
+    brace_for_impact: bool = False
+    regain_power_penalty: int = 0
+    # --- per-round state (reset by End Round) ------------------------------
+    turns_used: int = 0
+    systems_used: list = field(default_factory=list)
+    resistance_bonus: int = 0
+    evasive: bool = False
+    defensive_fire: bool = False
+    attack_pattern: bool = False
+    jammed: bool = False
+    slowed: bool = False
+    shaken: bool = False
+
+    # ----------------------------------------------------------------- derived
+    def crew_ratings(self) -> tuple:
+        return CREW_QUALITY.get(self.crew_quality, CREW_QUALITY[DEFAULT_CREW_QUALITY])
+
+    @property
+    def effective_resistance(self) -> int:
+        return max(0, self.resistance + self.resistance_bonus)
+
+    def total_breaches(self) -> int:
+        return sum(self.breaches.values())
+
+    def weapon(self, name: str):
+        return next((w for w in self.weapons if w.name == name), None)
+
+    # ----------------------------------------------------------------- state
+    def reset_round(self) -> None:
+        """Clear everything that only lasts until the end of the round."""
+        self.turns_used = 0
+        self.systems_used = []
+        self.resistance_bonus = 0
+        self.evasive = False
+        self.defensive_fire = False
+        self.attack_pattern = False
+        self.jammed = False
+        self.slowed = False
+        self.shaken = False
+
+    def clear_temporary_effects(self) -> None:
+        self.reset_round()
+        self.calibrated_weapons = False
+        self.targeting_solution = False
+        self.calibrated_sensors = False
+        self.weakness_scanned = ""
+        self.brace_for_impact = False
+        self.regain_power_penalty = 0
+        self.rerouted_power = ""
+        self.tractored_by = ""
+        self.tractor_strength = 0
+        self.warp_prepared = False
+        self.persistent_effects = []
+
+    def full_repair(self) -> None:
+        self.clear_temporary_effects()
+        self.shields = self.shields_max
+        self.breaches = {s: 0 for s in SYSTEMS}
+        self.devastating_systems = []
+        self.complications = []
+        self.reserve_power = True
+        self.shields_up = True
+        self.weapons_armed = True
+
+    def active_effects(self) -> list:
+        fx = []
+        if self.shaken:
+            fx.append("Shaken (this round)")
+        if self.brace_for_impact:
+            fx.append("Brace for Impact (no Major Action next turn)")
+        if self.regain_power_penalty:
+            fx.append(f"Losing Power (+{self.regain_power_penalty} to Regain Power)")
+        if self.resistance_bonus:
+            fx.append(f"Modulated Shields (+{self.resistance_bonus} Resistance)")
+        if self.evasive:
+            fx.append("Evasive Action")
+        if self.defensive_fire:
+            fx.append("Defensive Fire")
+        if self.attack_pattern:
+            fx.append("Attack Pattern")
+        if self.calibrated_weapons:
+            fx.append("Weapons Calibrated (+1 Dmg)")
+        if self.targeting_solution:
+            fx.append("Targeting Solution")
+        if self.calibrated_sensors:
+            fx.append("Sensors Calibrated")
+        if self.weakness_scanned:
+            fx.append("Weakness Scanned (" + ("+2 Dmg" if self.weakness_scanned == "damage"
+                                              else "Piercing") + ")")
+        if self.jammed:
+            fx.append("Jammed (+1 Comms/Sensors tasks)")
+        if self.slowed:
+            fx.append("Slowed (cannot Keep the Initiative)")
+        if self.tractored_by:
+            fx.append(f"Tractored by {self.tractored_by} (Strength {self.tractor_strength})")
+        if self.rerouted_power:
+            fx.append(f"Power rerouted to {self.rerouted_power}")
+        if self.warp_prepared:
+            fx.append("Prepared for Warp")
+        for eff in self.persistent_effects:
+            fx.append(f"Persistent {eff.get('amount', 1)} ({eff.get('source', '?')})")
+        return fx
+
+    # ------------------------------------------------------------ persistence
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["weapons"] = [w.to_dict() for w in self.weapons]
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Ship":
+        if not isinstance(data, dict) or not str(data.get("name", "")).strip():
+            raise ValueError("ship entry has no name")
+        ship = cls(name=str(data["name"]).strip())
+        for f in fields(cls):
+            if f.name in ("name", "weapons") or f.name not in data:
+                continue
+            default = getattr(ship, f.name)
+            value = data[f.name]
+            if isinstance(default, bool):
+                value = bool(value)
+            elif isinstance(default, int):
+                value = to_int(value, default)
+            elif isinstance(default, str):
+                value = "" if value is None else str(value)
+            elif isinstance(default, dict):
+                merged = dict(default)
+                if isinstance(value, dict):
+                    for key in merged:
+                        if key in value:
+                            merged[key] = to_int(value[key], merged[key])
+                value = merged
+            elif isinstance(default, list):
+                value = list(value) if isinstance(value, list) else default
+            setattr(ship, f.name, value)
+        ship.weapons = [Weapon.from_dict(w) for w in data.get("weapons", []) or []
+                        if isinstance(w, dict)]
+        # normalise
+        if ship.crew_quality not in CREW_QUALITY:
+            ship.crew_quality = DEFAULT_CREW_QUALITY
+        if ship.side not in SIDES:
+            ship.side = "NPC"
+        ship.scale = clamp(ship.scale, 1, 10)
+        ship.shields_max = max(0, ship.shields_max)
+        ship.shields = clamp(ship.shields, 0, ship.shields_max)
+        ship.resistance = max(0, ship.resistance)
+        ship.breaches = {s: max(0, v) for s, v in ship.breaches.items()}
+        ship.devastating_systems = [s for s in ship.devastating_systems if s in SYSTEMS]
+        ship.systems_used = [s for s in ship.systems_used if s in SYSTEMS]
+        ship.complications = [str(c) for c in ship.complications]
+        ship.persistent_effects = [
+            {"amount": max(1, to_int(e.get("amount", 1), 1)), "source": str(e.get("source", "?"))}
+            for e in ship.persistent_effects if isinstance(e, dict)]
+        if ship.weakness_scanned not in ("", "damage", "piercing"):
+            ship.weakness_scanned = ""
+        if ship.rerouted_power not in SYSTEMS:
+            ship.rerouted_power = ""
+        return ship
+
+
+def preset_ships() -> list:
+    aurora = Ship(
+        name="USS Aurora", ship_class="Akira-class Prototype", side="Player", scale=5,
+        crew_quality="Talented", shields_max=19, shields=19, resistance=7,
+        systems={"Communications": 9, "Computers": 10, "Engines": 10, "Sensors": 11,
+                 "Structure": 9, "Weapons": 11},
+        departments={"Command": 1, "Conn": 2, "Engineering": 3, "Security": 4,
+                     "Medicine": 3, "Science": 3},
+        weapons=[
+            Weapon("Phaser Arrays", "Energy", 6, "Medium", {"Versatile": 2}),
+            Weapon("Photon Torpedoes", "Torpedo", 6, "Long", {"High Yield": 0}),
+            Weapon("Quantum Torpedoes", "Torpedo", 7, "Long", {"High Yield": 0, "Intense": 0}),
+        ],
+        notes="Ablative Armor: +2 Resistance (included in Resistance 7). "
+              "Weapon profiles are editable samples.")
+    warbird = Ship(
+        name="D'Deridex Warbird", ship_class="D'Deridex-class Warbird", side="NPC", scale=6,
+        crew_quality="Talented", shields_max=21, shields=21, resistance=6,
+        systems={"Communications": 9, "Computers": 10, "Engines": 10, "Sensors": 11,
+                 "Structure": 11, "Weapons": 9},
+        departments={"Command": 3, "Conn": 2, "Engineering": 2, "Security": 4,
+                     "Medicine": 1, "Science": 3},
+        weapons=[
+            Weapon("Disruptor Banks", "Energy", 6, "Medium", {"Versatile": 2}),
+            Weapon("Plasma Torpedoes", "Torpedo", 7, "Long", {"Persistent": 2, "Cumbersome": 0}),
+        ],
+        notes="Romulan Star Empire. Cloaking Device. Weapon profiles are editable samples.")
+    return [aurora, warbird]
+
+
+def generate_npc_ship(name: str, scale: int, crew_quality: str, profile: str = "Balanced",
+                      rng=random) -> Ship:
+    """Build a plausible NPC vessel of the given Scale, Crew Quality and role."""
+    scale = clamp(to_int(scale, 4), 1, 7)
+    sys_mods, dept_bias = GENERATOR_PROFILES.get(profile, GENERATOR_PROFILES["Balanced"])
+    base = 7 + (scale + 1) // 2
+    systems = {s: clamp(base + sys_mods.get(s, 0) + rng.randint(-1, 1), 5, 14) for s in SYSTEMS}
+    departments = {d: 1 for d in DEPARTMENTS}
+    weights = [1 + 2 * dept_bias.get(d, 0) for d in DEPARTMENTS]
+    for _ in range(4 + scale // 2):
+        dept = rng.choices(DEPARTMENTS, weights=weights)[0]
+        if departments[dept] < 5:
+            departments[dept] += 1
+    shields = systems["Structure"] + departments["Security"] + scale
+    resistance = scale + (1 if profile == "Warship" else 0)
+    civilian = profile == "Freighter / Civilian"
+    energy_dmg = max(1, scale + (1 if systems["Weapons"] >= 11 else 0) - (2 if civilian else 0))
+    weapons = [Weapon("Energy Weapon Banks", "Energy", energy_dmg, "Medium",
+                      {"Versatile": 1} if scale >= 4 and not civilian else {})]
+    if not civilian and scale >= 3:
+        weapons.append(Weapon("Torpedo Launchers", "Torpedo", scale + 1, "Long", {"High Yield": 0}))
+    return Ship(
+        name=name, ship_class=f"Generated {profile} (Scale {scale})", side="NPC", scale=scale,
+        crew_quality=crew_quality if crew_quality in CREW_QUALITY else DEFAULT_CREW_QUALITY,
+        shields_max=shields, shields=shields, resistance=resistance, systems=systems,
+        departments=departments, weapons=weapons,
+        notes=f"Generated by NPC Generator ({profile}).")
+
+
+def parse_roster_data(data) -> tuple:
+    """Accept a roster save, a ship export, a list of ships or one ship dict.
+
+    Returns (ships, meta, errors)."""
+    meta = {}
+    if isinstance(data, dict) and "ships" in data:
+        entries = data.get("ships") or []
+        meta = {k: data[k] for k in ("round", "threat", "momentum", "gm_modifier",
+                                     "attacker", "target") if k in data}
+    elif isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict) and "name" in data:
+        entries = [data]
+    else:
+        raise ValueError("Unrecognised file: expected a roster with a 'ships' list.")
+    ships, errors = [], []
+    for i, entry in enumerate(entries, 1):
+        try:
+            ships.append(Ship.from_dict(entry))
+        except (ValueError, TypeError, AttributeError) as exc:
+            errors.append(f"entry {i}: {exc}")
+    return ships, meta, errors
+
+
+# =============================================================================
+# Rules engine (pure functions - no GUI)
+# =============================================================================
+
+@dataclass
+class Die:
+    roll: int
+    target: int
+    crit: int
+    source: str = "crew"        # crew | ship | assist
+    rerolled_from: int = 0
+
+    @property
+    def successes(self) -> int:
+        if self.roll <= self.crit:
+            return 2
+        return 1 if self.roll <= self.target else 0
+
+    @property
+    def complication(self) -> bool:
+        return self.roll == 20
+
+    def label(self) -> str:
+        prefix = f"({self.rerolled_from}->)" if self.rerolled_from else ""
+        return f"{prefix}{self.roll}{'*' * self.successes}{'!' if self.complication else ''}"
+
+
+@dataclass
+class TaskOutcome:
+    successes: int
+    difficulty: int
+    success: bool
+    excess: int
+    complications: int = 0
+    opposition: object = None
+    assist_ignored: bool = False
+    dice: list = field(default_factory=list)
+
+
+def make_die(target: int, crit: int, source: str = "crew", rng=random) -> Die:
+    return Die(rng.randint(1, 20), target, max(1, crit), source)
+
+
+def reroll_worst(dice: list, rng=random):
+    """Re-roll the worst (highest) crew die. Returns (old, new) or None."""
+    crew = [d for d in dice if d.source == "crew"]
+    if not crew:
+        return None
+    worst = max(crew, key=lambda d: d.roll)
+    old = worst.roll
+    worst.rerolled_from = old
+    worst.roll = rng.randint(1, 20)
+    return old, worst.roll
+
+
+def outcome_from_successes(total: int, difficulty: int, opposition=None, complications: int = 0,
+                           dice=None, assist_ignored: bool = False) -> TaskOutcome:
+    success = total >= difficulty
+    bar = difficulty
+    if opposition is not None:
+        # Opposed task: must also beat the defender (ties favour the defender).
+        success = success and total > opposition
+        bar = max(difficulty, opposition)
+    excess = max(0, total - bar) if success else 0
+    return TaskOutcome(total, difficulty, success, excess, complications, opposition,
+                       assist_ignored, list(dice or []))
+
+
+def evaluate_task(dice: list, difficulty: int, opposition=None) -> TaskOutcome:
+    """Assist dice (ship / helpers) only count if the crew scored a success."""
+    crew = sum(d.successes for d in dice if d.source == "crew")
+    helpers = sum(d.successes for d in dice if d.source != "crew")
+    total = crew + (helpers if crew > 0 else 0)
+    comps = sum(1 for d in dice if d.complication)
+    return outcome_from_successes(total, difficulty, opposition, comps, dice,
+                                  assist_ignored=crew == 0 and helpers > 0)
+
+
+def format_dice(dice: list) -> str:
+    groups = []
+    for source, title in (("crew", "Crew"), ("ship", "Ship"), ("assist", "Assist")):
+        rolled = [d.label() for d in dice if d.source == source]
+        if rolled:
+            groups.append(f"{title}: {' '.join(rolled)}")
+    return " | ".join(groups)
+
+
+def bonus_dice_cost(pool_size: int) -> int:
+    """Momentum cost for extra d20s: 3rd = 1, 4th = 2, 5th = 3 (cumulative)."""
+    extra = clamp(pool_size, 2, MAX_DICE_POOL) - 2
+    return extra * (extra + 1) // 2
+
+
+def bonus_damage_cost_each(weapon) -> int:
+    if weapon is not None and (weapon.has("Intense") or weapon.has("Depleting")):
+        return 1
+    return BONUS_DAMAGE_COST
+
+
+def devastating_attack_cost(weapon) -> int:
+    return 1 if weapon is not None and weapon.has("Spread") else DEVASTATING_ATTACK_COST
+
+
+def minor_damage_lookup(roll: int) -> str:
+    for low, high, name, _desc in MINOR_DAMAGE_TABLE:
+        if low <= roll <= high:
+            return name
+    raise ValueError(f"roll {roll} outside minor damage table")
+
+
+def minor_damage_description(name: str) -> str:
+    return next((desc for _l, _h, n, desc in MINOR_DAMAGE_TABLE if n == name), "")
+
+
+def roll_minor_damage(rng=random) -> tuple:
+    """Roll d20 on the Minor Damage table, automatically re-rolling 19-20.
+
+    Returns (list_of_rolls, result_name)."""
+    rolls = []
+    for _ in range(100):
+        roll = rng.randint(1, 20)
+        rolls.append(roll)
+        name = minor_damage_lookup(roll)
+        if name != MINOR_DAMAGE_REROLL:
+            return rolls, name
+    return rolls, MINOR_DAMAGE_TABLE[0][2]
+
+
+def system_hit_lookup(roll: int) -> str:
+    for low, high, system in SYSTEM_HIT_TABLE:
+        if low <= roll <= high:
+            return system
+    raise ValueError(f"roll {roll} outside system hit table")
+
+
+def roll_system_hit(rng=random) -> tuple:
+    roll = rng.randint(1, SYSTEM_HIT_DIE)
+    return roll, system_hit_lookup(roll)
+
+
+@dataclass
+class DamageOutcome:
+    raw: int
+    resistance_applied: int
+    final_damage: int
+    shields_before: int
+    shields_after: int
+    shaken_reasons: list = field(default_factory=list)
+    breach_reasons: list = field(default_factory=list)
+
+
+def resolve_shield_damage(shields: int, shields_max: int, raw_damage: int, resistance: int,
+                          piercing: bool = False) -> DamageOutcome:
+    """Apply one attack to a ship's Shields and work out Shaken / Breach triggers.
+
+    * Resistance is deducted unless the attack is Piercing.
+    * Hit while Shields are 0, or Shields reduced to 0 -> Breach.
+    * Shields dropping below 50% or below 25% -> Shaken.
+    * Dropping below 25% after already becoming Shaken in the SAME attack -> Breach instead.
+    """
+    applied = 0 if piercing else max(0, resistance)
+    final = max(0, raw_damage - applied)
+    before = max(0, shields)
+    after = max(0, before - final)
+    out = DamageOutcome(raw_damage, applied, final, before, after)
+    if final <= 0:
+        return out
+    if before <= 0:
+        out.breach_reasons.append("hit while Shields at 0")
+        return out
+    if after == 0:
+        out.breach_reasons.append("Shields reduced to 0")
+        return out
+    half, quarter = shields_max * 0.5, shields_max * 0.25
+    crossed_half = before >= half > after
+    crossed_quarter = before >= quarter > after
+    if crossed_half:
+        out.shaken_reasons.append("Shields dropped below 50%")
+    if crossed_quarter:
+        if crossed_half:
+            out.breach_reasons.append("Shields below 25% while already Shaken by this attack")
+        else:
+            out.shaken_reasons.append("Shields dropped below 25%")
+    return out
+
+
+def range_penalty(range_band: str) -> int:
+    if range_band not in RANGES:
+        return 0
+    return max(0, RANGES.index(range_band) - RANGES.index("Close"))
+
+
+def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
+                       range_band: str = "Close", gm_modifier: int = 0):
+    """Total Difficulty = Base + Weapon modifiers + context penalties + GM Modifier.
+
+    Returns (total, [(label, value), ...]) or (None, []) for actions without a roll."""
+    if not adef or not adef["roll"]:
+        return None, []
+    parts = []
+    base = adef["base"]
+    if action_name == "Fire":
+        if weapon is not None and weapon.wtype == "Torpedo":
+            base = TORPEDO_BASE_DIFFICULTY
+            parts.append(("Base (Torpedo)", base))
+        else:
+            parts.append(("Base (Energy)", base))
+    else:
+        parts.append(("Base", base))
+    if adef["attack"]:
+        parts.append(("Weapon mods (Cumbersome)" if weapon is not None and weapon.has("Cumbersome")
+                      else "Weapon mods", 1 if weapon is not None and weapon.has("Cumbersome")
+                      else 0))
+    if adef["range_penalty"]:
+        pen = range_penalty(range_band)
+        if pen:
+            parts.append((f"Range ({range_band})", pen))
+    if ship is not None:
+        if adef["attack"] and ship.evasive:
+            parts.append(("Own Evasive Action", 1))
+        if action_name == "Regenerate Shields" and ship.shields <= 0:
+            parts.append(("Shields at 0", 1))
+        if action_name == "Regain Power" and ship.regain_power_penalty:
+            parts.append(("Losing Power!", ship.regain_power_penalty))
+        if ship.jammed and adef["system"] in ("Communications", "Sensors"):
+            parts.append(("Jammed", 1))
+        if action_name == "Damage Control" and ship.devastating_systems:
+            parts.append(("Devastating breaches", 1))
+    parts.append(("GM Modifier", gm_modifier))
+    total = max(0, sum(v for _label, v in parts))
+    return total, parts
+
+
+def format_difficulty(total, parts) -> str:
+    if total is None:
+        return "No task roll required."
+    text = ""
+    for i, (label, value) in enumerate(parts):
+        if i == 0:
+            text = f"{label} {value}"
+        elif value < 0:
+            text += f" - {label} {abs(value)}"
+        else:
+            text += f" + {label} {value}"
+    return f"{text} = {total}"
+
+
+# =============================================================================
+# Reusable widgets / dialogs
+# =============================================================================
+
+def make_modal(win: tk.Toplevel, parent) -> None:
+    win.transient(parent)
+    win.update_idletasks()
+    try:
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        win.geometry(f"+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+    except tk.TclError:
+        pass
+    try:
+        win.wait_visibility()
+        win.grab_set()
+    except tk.TclError:
+        pass
+    win.focus_set()
+
+
+def set_enabled(widget, enabled: bool) -> None:
+    if isinstance(widget, ttk.Combobox):
+        widget.configure(state="readonly" if enabled else "disabled")
+    else:
+        widget.state(["!disabled"] if enabled else ["disabled"])
+
+
+def int_var_value(var, default=0) -> int:
+    try:
+        return int(var.get())
+    except (tk.TclError, ValueError):
+        return default
+
+
+class ScrollableFrame(ttk.Frame):
+    """A vertically scrollable container; put children in `.body`."""
+
+    def __init__(self, master, width=400, **kw):
+        super().__init__(master, **kw)
+        bg = ttk.Style().lookup("TFrame", "background") or None
+        self.canvas = tk.Canvas(self, width=width, highlightthickness=0, borderwidth=0,
+                                background=bg)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.body = ttk.Frame(self.canvas, padding=(4, 4, 8, 4))
+        self._win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vsb.grid(row=0, column=1, sticky="ns")
+        self.hsb.grid(row=1, column=0, sticky="ew")
+        self.hsb.grid_remove()
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.body.bind("<Configure>", self._on_body_configure)
+        self.canvas.bind("<Configure>", self._fit_width)
+
+    def _on_body_configure(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._fit_width()
+
+    def _fit_width(self, _event=None):
+        """Stretch the body to the panel width, but never squeeze it below its natural
+        width (Tk grids would collapse weighted columns); scroll sideways instead."""
+        width, need = self.canvas.winfo_width(), self.body.winfo_reqwidth()
+        self.canvas.itemconfigure(self._win, width=max(width, need))
+        if need > width > 1:
+            self.hsb.grid()
+        else:
+            self.hsb.grid_remove()
+            self.canvas.xview_moveto(0)
+
+    def fit_to_content(self) -> None:
+        """Request enough width to show the body without horizontal scrolling."""
+        self.update_idletasks()
+        self.canvas.configure(width=self.body.winfo_reqwidth())
+
+    def scroll(self, steps: int) -> None:
+        if self.body.winfo_reqheight() > self.canvas.winfo_height():
+            self.canvas.yview_scroll(steps, "units")
+
+
+class ShieldBar(tk.Canvas):
+    """Horizontal shield gauge with 50% / 25% Shaken threshold markers."""
+
+    def __init__(self, master, height=24, **kw):
+        super().__init__(master, height=height, highlightthickness=1,
+                         highlightbackground="#555577", background="#1b1b2f", **kw)
+        self._value = (0, 0)
+        self.bind("<Configure>", lambda _e: self._draw())
+
+    def set_value(self, current: int, maximum: int) -> None:
+        self._value = (current, maximum)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w, h = max(self.winfo_width(), 20), max(self.winfo_height(), 10)
+        cur, mx = self._value
+        frac = 0.0 if mx <= 0 else clamp(cur / mx, 0.0, 1.0)
+        color = "#2e9e5b" if frac >= 0.5 else ("#d39e00" if frac >= 0.25 else "#c0392b")
+        if frac > 0:
+            self.create_rectangle(0, 0, w * frac, h, fill=color, width=0)
+        for t in (0.5, 0.25):
+            self.create_line(w * t, 0, w * t, h, fill="#ffffff", dash=(3, 2))
+        self.create_text(w / 2, h / 2, fill="#ffffff",
+                         text=f"Shields {cur}/{mx}  ({frac * 100:.0f}%)")
+
+
+class ChoiceDialog(tk.Toplevel):
+    def __init__(self, parent, title, prompt, options, default=None):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.result = None
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=prompt, wraplength=420, justify="left").pack(anchor="w", pady=(0, 8))
+        self.var = tk.StringVar(value=default if default in options else options[0])
+        for opt in options:
+            ttk.Radiobutton(frm, text=opt, value=opt, variable=self.var).pack(anchor="w")
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        make_modal(self, parent)
+
+    def _ok(self):
+        self.result = self.var.get()
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, title, prompt, options, default=None):
+        if not options:
+            return None
+        dlg = cls(parent, title, prompt, list(options), default)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+class ShakenDialog(tk.Toplevel):
+    """Shaken Resolver: choose a Minor Damage result manually or auto-roll a d20."""
+
+    def __init__(self, parent, ship_name: str, reason: str, rng=random):
+        super().__init__(parent)
+        self.title(f"Shaken Resolver - {ship_name}")
+        self.resizable(False, False)
+        self.rng = rng
+        self.result = None
+        self.rolls = []
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=f"{ship_name} is SHAKEN!", style="Alert.TLabel").pack(anchor="w")
+        ttk.Label(frm, text=f"Cause: {reason}", wraplength=460).pack(anchor="w", pady=(0, 8))
+        box = ttk.LabelFrame(frm, text="STA 2e Minor Damage Table (d20)", padding=8)
+        box.pack(fill="x")
+        self.var = tk.StringVar(value=MINOR_DAMAGE_TABLE[0][2])
+        for low, high, name, desc in MINOR_DAMAGE_TABLE:
+            ttk.Radiobutton(box, text=f"{low}-{high}: {name}  -  {desc}", value=name,
+                            variable=self.var).pack(anchor="w", pady=1)
+        self.roll_lbl = ttk.Label(frm, text="Select a result manually, or Auto-Roll.",
+                                  wraplength=460)
+        self.roll_lbl.pack(anchor="w", pady=8)
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Auto-Roll d20", command=self.auto_roll).pack(side="left")
+        ttk.Button(btns, text="Apply Result", style="Accent.TButton",
+                   command=self._apply).pack(side="right")
+        ttk.Button(btns, text="Skip", command=self.destroy).pack(side="right", padx=6)
+        make_modal(self, parent)
+
+    def auto_roll(self):
+        rolls, name = roll_minor_damage(self.rng)
+        self.rolls = rolls
+        self.var.set(name)
+        trail = " -> ".join(f"{r} ({minor_damage_lookup(r)})" for r in rolls)
+        self.roll_lbl.configure(text=f"Rolled: {trail}")
+
+    def _apply(self):
+        name = self.var.get()
+        if name == MINOR_DAMAGE_REROLL:
+            self.auto_roll()        # choosing "Re-roll" manually rolls the table again
+            return
+        self.result = (name, list(self.rolls))
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, ship_name, reason, rng=random):
+        dlg = cls(parent, ship_name, reason, rng)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+class WeaponDialog(tk.Toplevel):
+    def __init__(self, parent, weapon=None):
+        super().__init__(parent)
+        self.title("Weapon" if weapon is None else f"Edit Weapon - {weapon.name}")
+        self.resizable(False, False)
+        self.result = None
+        w = weapon or Weapon()
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        self.name_var = tk.StringVar(value=w.name)
+        self.type_var = tk.StringVar(value=w.wtype)
+        self.dmg_var = tk.IntVar(value=w.damage)
+        self.range_var = tk.StringVar(value=w.range)
+        ttk.Label(frm, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=self.name_var, width=28).grid(row=0, column=1, columnspan=3,
+                                                                  sticky="ew", pady=2)
+        ttk.Label(frm, text="Type").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(frm, textvariable=self.type_var, values=WEAPON_TYPES, state="readonly",
+                     width=10).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(frm, text="Damage").grid(row=1, column=2, sticky="e", padx=(8, 2))
+        ttk.Spinbox(frm, from_=0, to=20, textvariable=self.dmg_var, width=5).grid(
+            row=1, column=3, sticky="w")
+        ttk.Label(frm, text="Range").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(frm, textvariable=self.range_var, values=WEAPON_RANGES, state="readonly",
+                     width=10).grid(row=2, column=1, sticky="w", pady=2)
+        qbox = ttk.LabelFrame(frm, text="Qualities", padding=6)
+        qbox.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.q_vars = {}
+        for i, (q, (has_x, desc)) in enumerate(WEAPON_QUALITIES.items()):
+            row, col = divmod(i, 2)
+            cell = ttk.Frame(qbox)
+            cell.grid(row=row, column=col, sticky="w", padx=4, pady=1)
+            on = tk.BooleanVar(value=w.has(q))
+            ttk.Checkbutton(cell, text=q + (" X" if has_x else ""), variable=on).pack(side="left")
+            xv = None
+            if has_x:
+                xv = tk.IntVar(value=max(1, to_int(w.qualities.get(q, 1), 1)))
+                ttk.Spinbox(cell, from_=1, to=9, textvariable=xv, width=3).pack(side="left", padx=2)
+            self.q_vars[q] = (on, xv)
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+        make_modal(self, parent)
+
+    def _ok(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showerror("Weapon", "The weapon needs a name.", parent=self)
+            return
+        quals = {}
+        for q, (on, xv) in self.q_vars.items():
+            if on.get():
+                quals[q] = max(1, int_var_value(xv, 1)) if xv is not None else 0
+        self.result = Weapon(name, self.type_var.get(), max(0, int_var_value(self.dmg_var, 0)),
+                             self.range_var.get(), quals)
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, weapon=None):
+        dlg = cls(parent, weapon)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+class ShipEditor(tk.Toplevel):
+    """Custom Ship creator / editor (systems, departments, weapons, crew quality)."""
+
+    def __init__(self, parent, ship, existing_names, title):
+        super().__init__(parent)
+        self.title(title)
+        self.result = None
+        self.is_new = ship is None
+        self.src = copy.deepcopy(ship) if ship else Ship(name="New Ship")
+        self.existing = set(existing_names) - ({ship.name} if ship else set())
+        self.weapons = [copy.deepcopy(w) for w in self.src.weapons]
+        s = self.src
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(0, weight=1)
+        frm.columnconfigure(1, weight=1)
+
+        gen = ttk.LabelFrame(frm, text="General", padding=6)
+        gen.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.name_var = tk.StringVar(value=s.name)
+        self.class_var = tk.StringVar(value=s.ship_class)
+        self.side_var = tk.StringVar(value=s.side)
+        self.scale_var = tk.IntVar(value=s.scale)
+        self.quality_var = tk.StringVar(value=s.crew_quality)
+        self.shields_var = tk.IntVar(value=s.shields_max)
+        self.res_var = tk.IntVar(value=s.resistance)
+        ttk.Label(gen, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(gen, textvariable=self.name_var, width=30).grid(row=0, column=1, columnspan=3,
+                                                                  sticky="ew", pady=2)
+        ttk.Label(gen, text="Class / Notes").grid(row=1, column=0, sticky="w")
+        ttk.Entry(gen, textvariable=self.class_var, width=30).grid(row=1, column=1, columnspan=3,
+                                                                   sticky="ew", pady=2)
+        ttk.Label(gen, text="Side").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(gen, textvariable=self.side_var, values=SIDES, state="readonly",
+                     width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(gen, text="Scale").grid(row=2, column=2, sticky="e", padx=(8, 2))
+        ttk.Spinbox(gen, from_=1, to=10, textvariable=self.scale_var, width=5).grid(
+            row=2, column=3, sticky="w")
+        ttk.Label(gen, text="Crew Quality").grid(row=3, column=0, sticky="w")
+        qcb = ttk.Combobox(gen, textvariable=self.quality_var, values=list(CREW_QUALITY),
+                           state="readonly", width=12)
+        qcb.grid(row=3, column=1, sticky="w", pady=2)
+        self.quality_info = ttk.Label(gen, text="")
+        self.quality_info.grid(row=3, column=2, columnspan=2, sticky="w", padx=(8, 0))
+        qcb.bind("<<ComboboxSelected>>", lambda _e: self._update_quality_info())
+        ttk.Label(gen, text="Shields (max)").grid(row=4, column=0, sticky="w")
+        ttk.Spinbox(gen, from_=0, to=60, textvariable=self.shields_var, width=5).grid(
+            row=4, column=1, sticky="w")
+        ttk.Label(gen, text="Resistance").grid(row=4, column=2, sticky="e", padx=(8, 2))
+        ttk.Spinbox(gen, from_=0, to=20, textvariable=self.res_var, width=5).grid(
+            row=4, column=3, sticky="w")
+        ttk.Button(gen, text="Auto-calc (Shields = Structure + Security + Scale, "
+                             "Resistance = Scale)",
+                   command=self._auto_calc).grid(row=5, column=0, columnspan=4, sticky="w",
+                                                 pady=(4, 0))
+        gen.columnconfigure(1, weight=1)
+
+        sysf = ttk.LabelFrame(frm, text="Systems", padding=6)
+        sysf.grid(row=1, column=0, sticky="nsew", pady=6, padx=(0, 3))
+        self.sys_vars = {}
+        for i, name in enumerate(SYSTEMS):
+            self.sys_vars[name] = tk.IntVar(value=s.systems.get(name, 8))
+            ttk.Label(sysf, text=name).grid(row=i, column=0, sticky="w")
+            ttk.Spinbox(sysf, from_=1, to=16, textvariable=self.sys_vars[name], width=5).grid(
+                row=i, column=1, sticky="w", pady=1)
+        deptf = ttk.LabelFrame(frm, text="Departments", padding=6)
+        deptf.grid(row=1, column=1, sticky="nsew", pady=6, padx=(3, 0))
+        self.dept_vars = {}
+        for i, name in enumerate(DEPARTMENTS):
+            self.dept_vars[name] = tk.IntVar(value=s.departments.get(name, 2))
+            ttk.Label(deptf, text=name).grid(row=i, column=0, sticky="w")
+            ttk.Spinbox(deptf, from_=0, to=5, textvariable=self.dept_vars[name], width=5).grid(
+                row=i, column=1, sticky="w", pady=1)
+
+        wf = ttk.LabelFrame(frm, text="Weapons", padding=6)
+        wf.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        cols = ("type", "damage", "range", "qualities")
+        self.tree = ttk.Treeview(wf, columns=cols, height=5, selectmode="browse")
+        self.tree.heading("#0", text="Name")
+        self.tree.column("#0", width=150)
+        for c, w in zip(cols, (70, 70, 70, 200)):
+            self.tree.heading(c, text=c.title())
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
+        self.tree.bind("<Double-1>", lambda _e: self._edit_weapon())
+        ttk.Button(wf, text="Add Weapon...", command=self._add_weapon).grid(row=1, column=0,
+                                                                            sticky="w", pady=4)
+        ttk.Button(wf, text="Edit...", command=self._edit_weapon).grid(row=1, column=1, sticky="w")
+        ttk.Button(wf, text="Remove", command=self._remove_weapon).grid(row=1, column=2,
+                                                                        sticky="w")
+        wf.columnconfigure(3, weight=1)
+
+        nf = ttk.LabelFrame(frm, text="Talents / Notes", padding=6)
+        nf.grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+        self.notes = tk.Text(nf, height=3, width=60, wrap="word")
+        self.notes.pack(fill="both", expand=True)
+        self.notes.insert("1.0", s.notes)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="ew")
+        ttk.Button(btns, text="Save Ship", style="Accent.TButton",
+                   command=self._save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+
+        self._update_quality_info()
+        self._refresh_tree()
+        make_modal(self, parent)
+
+    def _update_quality_info(self):
+        a, d = CREW_QUALITY.get(self.quality_var.get(), CREW_QUALITY[DEFAULT_CREW_QUALITY])
+        self.quality_info.configure(text=f"NPC crew: Attribute {a} / Department {d}")
+
+    def _auto_calc(self):
+        scale = int_var_value(self.scale_var, 4)
+        self.shields_var.set(int_var_value(self.sys_vars["Structure"], 8)
+                             + int_var_value(self.dept_vars["Security"], 2) + scale)
+        self.res_var.set(scale)
+
+    def _refresh_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, w in enumerate(self.weapons):
+            self.tree.insert("", "end", iid=str(i), text=w.name,
+                             values=(w.wtype, w.damage, w.range, w.quality_text()))
+
+    def _selected_index(self):
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _regrab(self):
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    def _add_weapon(self):
+        w = WeaponDialog.ask(self)
+        self._regrab()
+        if w:
+            self.weapons.append(w)
+            self._refresh_tree()
+
+    def _edit_weapon(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        w = WeaponDialog.ask(self, self.weapons[idx])
+        self._regrab()
+        if w:
+            self.weapons[idx] = w
+            self._refresh_tree()
+
+    def _remove_weapon(self):
+        idx = self._selected_index()
+        if idx is not None:
+            del self.weapons[idx]
+            self._refresh_tree()
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showerror("Ship", "The ship needs a name.", parent=self)
+            return
+        if name in self.existing:
+            messagebox.showerror("Ship", f"A ship named '{name}' already exists.", parent=self)
+            return
+        ship = self.src
+        old_max, was_full = ship.shields_max, ship.shields >= ship.shields_max
+        ship.name = name
+        ship.ship_class = self.class_var.get().strip()
+        ship.side = self.side_var.get() if self.side_var.get() in SIDES else "NPC"
+        ship.scale = clamp(int_var_value(self.scale_var, 4), 1, 10)
+        ship.crew_quality = self.quality_var.get()
+        ship.shields_max = max(0, int_var_value(self.shields_var, old_max))
+        ship.resistance = max(0, int_var_value(self.res_var, ship.resistance))
+        ship.systems = {k: max(1, int_var_value(v, 8)) for k, v in self.sys_vars.items()}
+        ship.departments = {k: clamp(int_var_value(v, 2), 0, 5) for k, v in self.dept_vars.items()}
+        ship.weapons = self.weapons
+        ship.notes = self.notes.get("1.0", "end").strip()
+        if self.is_new or was_full:
+            ship.shields = ship.shields_max
+        else:
+            ship.shields = min(ship.shields, ship.shields_max)
+        self.result = ship
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, ship, existing_names, title):
+        dlg = cls(parent, ship, existing_names, title)
+        parent.wait_window(dlg)
+        return dlg.result
+
+
+# =============================================================================
+# Main application
+# =============================================================================
+
+class CombatHelperApp:
+    def __init__(self, root: tk.Tk, data_file: str = DATA_FILE, autoload: bool = True, rng=None):
+        self.root = root
+        self.data_file = data_file
+        self.rng = rng or random.Random()
+        self.ships: list = []
+        self.round = 1
+        self.threat = 0
+        self.momentum = 0
+        self.dirty = False
+        self.pending_attack = None
+        self.last_system_hit = None
+        self._refreshing = False
+        self._last_attacker = None
+
+        root.title(APP_NAME)
+        width = min(1540, max(900, root.winfo_screenwidth() - 40))
+        height = min(960, max(600, root.winfo_screenheight() - 80))
+        root.geometry(f"{width}x{height}+10+10")
+        root.minsize(900, 600)
+        self._setup_style()
+        self._init_vars()
+        self._build_menu()
+        self._build_layout()
+        self._bind_mousewheel()
+        self._startup_load(autoload)
+        for panel in (self.left_panel, self.mid_panel, self.right_panel):
+            panel.fit_to_content()
+        root.after(100, self._place_log_sash)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ------------------------------------------------------------------ style
+    def _setup_style(self):
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        base = tkfont.nametofont("TkDefaultFont")
+        family = base.actual("family")
+        self.font_bold = tkfont.Font(family=family, size=10, weight="bold")
+        self.font_big = tkfont.Font(family=family, size=13, weight="bold")
+        self.font_counter = tkfont.Font(family=family, size=20, weight="bold")
+        self.font_mono = tkfont.nametofont("TkFixedFont")
+        purple, orange = "#5b2c83", "#c76b00"
+        style.configure("TLabelframe.Label", font=self.font_bold, foreground=purple)
+        style.configure("Header.TLabel", font=self.font_big, foreground=purple)
+        style.configure("Bold.TLabel", font=self.font_bold)
+        style.configure("Threat.TLabel", font=self.font_counter, foreground="#b03a2e")
+        style.configure("Momentum.TLabel", font=self.font_counter, foreground="#1f5fbf")
+        style.configure("Round.TLabel", font=self.font_counter, foreground=orange)
+        style.configure("Diff.TLabel", font=self.font_counter, foreground=purple)
+        style.configure("Alert.TLabel", font=self.font_bold, foreground="#b03a2e")
+        style.configure("Good.TLabel", font=self.font_bold, foreground="#1e7e46")
+        style.configure("Info.TLabel", foreground="#333344")
+        style.configure("Major.TLabel", font=self.font_bold, foreground="#ffffff",
+                        background="#b03a2e", padding=(6, 1))
+        style.configure("Minor.TLabel", font=self.font_bold, foreground="#ffffff",
+                        background="#1f5fbf", padding=(6, 1))
+        for name, color, active in (("Accent", "#1f5fbf", "#2f74db"),
+                                    ("EndRound", "#c76b00", "#e07f10"),
+                                    ("Damage", "#b03a2e", "#cf4b3d")):
+            style.configure(f"{name}.TButton", font=self.font_bold, foreground="#ffffff",
+                            background=color)
+            style.map(f"{name}.TButton", background=[("disabled", "#9a9aa6"), ("active", active)])
+
+    # ------------------------------------------------------------------- vars
+    def _init_vars(self):
+        self.gm_mod_var = tk.IntVar(value=0)
+        self.attacker_var = tk.StringVar()
+        self.target_var = tk.StringVar()
+        self.station_var = tk.StringVar(value=list(BRIDGE_STATIONS)[0])
+        self.action_var = tk.StringVar()
+        self.weapon_var = tk.StringVar()
+        self.salvo_var = tk.BooleanVar(value=False)
+        self.range_var = tk.StringVar(value="Medium")
+        self.tsol_mode_var = tk.StringVar(value="reroll")
+        self.scan_mode_var = tk.StringVar(value="damage")
+        self.regen_boost_var = tk.BooleanVar(value=False)
+        self.crew_attr_var = tk.IntVar(value=10)
+        self.crew_dept_var = tk.IntVar(value=3)
+        self.focus_var = tk.BooleanVar(value=True)
+        self.dice_var = tk.IntVar(value=2)
+        self.autopay_var = tk.BooleanVar(value=True)
+        self.assist_var = tk.BooleanVar(value=True)
+        self.mode_var = tk.StringVar(value="auto")
+        self.manual_succ_var = tk.IntVar(value=0)
+        self.opp_var = tk.IntVar(value=0)
+        # damage resolver
+        self.dmg_weapon_var = tk.StringVar(value=CUSTOM_WEAPON)
+        self.dmg_base_var = tk.IntVar(value=0)
+        self.dmg_bonus_var = tk.IntVar(value=0)
+        self.pierce_var = tk.BooleanVar(value=False)
+        self.devastate_var = tk.BooleanVar(value=False)
+        # target state toggles
+        self.tgt_reserve_var = tk.BooleanVar()
+        self.tgt_shields_up_var = tk.BooleanVar()
+        self.tgt_armed_var = tk.BooleanVar()
+        self.tgt_set_shields_var = tk.IntVar(value=0)
+        # generator
+        self.gen_name_var = tk.StringVar()
+        self.gen_scale_var = tk.IntVar(value=4)
+        self.gen_quality_var = tk.StringVar(value=DEFAULT_CREW_QUALITY)
+        self.gen_profile_var = tk.StringVar(value="Balanced")
+
+        for var in (self.gm_mod_var, self.weapon_var, self.salvo_var, self.range_var,
+                    self.tsol_mode_var, self.scan_mode_var, self.regen_boost_var,
+                    self.crew_attr_var, self.crew_dept_var, self.focus_var, self.dice_var,
+                    self.autopay_var, self.assist_var, self.mode_var):
+            var.trace_add("write", lambda *_a: self._on_option_change())
+        for var in (self.dmg_base_var, self.dmg_bonus_var, self.pierce_var, self.devastate_var):
+            var.trace_add("write", lambda *_a: self._on_damage_option_change())
+        self.gen_quality_var.trace_add("write", lambda *_a: self._update_gen_info())
+
+    # ------------------------------------------------------------------- menu
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+        fm = tk.Menu(menubar, tearoff=False)
+        fm.add_command(label="Save Roster to JSON", command=self.save_roster_clicked,
+                       accelerator="Ctrl+S")
+        fm.add_command(label="Load Roster from JSON", command=self.load_roster_clicked)
+        fm.add_separator()
+        fm.add_command(label="Save Roster As...", command=self.save_roster_as)
+        fm.add_command(label="Load Roster From File...", command=self.load_roster_from)
+        fm.add_separator()
+        fm.add_command(label="Import Ship(s)...", command=self.import_ships)
+        fm.add_command(label="Export Selected Ship...", command=self.export_ship)
+        fm.add_command(label="Export Combat Log...", command=self.export_log)
+        fm.add_separator()
+        fm.add_command(label="Reset Roster to Presets", command=self.reset_to_presets)
+        fm.add_separator()
+        fm.add_command(label="Exit", command=self.on_close)
+        menubar.add_cascade(label="File", menu=fm)
+        hm = tk.Menu(menubar, tearoff=False)
+        hm.add_command(label="Quick Reference...", command=self.show_reference)
+        hm.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=hm)
+        self.root.configure(menu=menubar)
+        self.root.bind_all("<Control-s>", lambda _e: self.save_roster_clicked())
+
+    # ----------------------------------------------------------------- layout
+    def _build_layout(self):
+        outer = ttk.Frame(self.root)
+        outer.pack(fill="both", expand=True)
+        self._build_top(outer)
+        self.vpane = vpane = ttk.PanedWindow(outer, orient="vertical")
+        vpane.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        hpane = ttk.PanedWindow(vpane, orient="horizontal")
+        vpane.add(hpane, weight=5)
+        self.left_panel = ScrollableFrame(hpane, width=390)
+        self.mid_panel = ScrollableFrame(hpane, width=500)
+        self.right_panel = ScrollableFrame(hpane, width=470)
+        hpane.add(self.left_panel, weight=1)
+        hpane.add(self.mid_panel, weight=1)
+        hpane.add(self.right_panel, weight=1)
+        self._build_left(self.left_panel.body)
+        self._build_middle(self.mid_panel.body)
+        self._build_right(self.right_panel.body)
+        logf = ttk.LabelFrame(vpane, text="Combat History Log", padding=4)
+        vpane.add(logf, weight=1)
+        self._build_log(logf)
+
+    # ---------------------------------------------------------------- top bar
+    def _build_top(self, parent):
+        top = ttk.Frame(parent, padding=(8, 6, 8, 2))
+        top.pack(fill="x")
+
+        tf = ttk.LabelFrame(top, text="Threat", padding=(6, 0))
+        tf.pack(side="left", padx=(0, 8))
+        ttk.Button(tf, text="-", width=3, command=lambda: self.adjust_pool("threat", -1)).pack(
+            side="left")
+        self.threat_lbl = ttk.Label(tf, text="0", width=3, anchor="center", style="Threat.TLabel")
+        self.threat_lbl.pack(side="left", padx=4)
+        ttk.Button(tf, text="+", width=3, command=lambda: self.adjust_pool("threat", 1)).pack(
+            side="left")
+
+        mf = ttk.LabelFrame(top, text=f"Momentum (max {MOMENTUM_MAX})", padding=(6, 0))
+        mf.pack(side="left", padx=(0, 8))
+        ttk.Button(mf, text="-", width=3, command=lambda: self.adjust_pool("momentum", -1)).pack(
+            side="left")
+        self.momentum_lbl = ttk.Label(mf, text="0", width=3, anchor="center",
+                                      style="Momentum.TLabel")
+        self.momentum_lbl.pack(side="left", padx=4)
+        ttk.Button(mf, text="+", width=3, command=lambda: self.adjust_pool("momentum", 1)).pack(
+            side="left")
+
+        rf = ttk.LabelFrame(top, text="Round", padding=(6, 0))
+        rf.pack(side="left", padx=(0, 8))
+        self.round_lbl = ttk.Label(rf, text="1", width=3, anchor="center", style="Round.TLabel")
+        self.round_lbl.pack(side="left", padx=4)
+        ttk.Button(rf, text="END ROUND", style="EndRound.TButton", command=self.end_round).pack(
+            side="left", padx=4, pady=4)
+
+        gf = ttk.LabelFrame(top, text="GM Modifier [ + / - ]", padding=(6, 0))
+        gf.pack(side="left", padx=(0, 8))
+        ttk.Spinbox(gf, from_=-3, to=5, increment=1, textvariable=self.gm_mod_var, width=4,
+                    font=self.font_big, state="readonly").pack(side="left", pady=6, padx=2)
+        ttk.Label(gf, text="Difficulty\n(-3 to +5)", style="Info.TLabel").pack(side="left", padx=4)
+
+        sf = ttk.Frame(top)
+        sf.pack(side="right")
+        ttk.Button(sf, text="Save Roster to JSON", command=self.save_roster_clicked).pack(
+            side="top", fill="x", pady=1)
+        ttk.Button(sf, text="Load Roster from JSON", command=self.load_roster_clicked).pack(
+            side="top", fill="x", pady=1)
+        self.file_lbl = ttk.Label(top, text="", style="Info.TLabel", justify="right")
+        self.file_lbl.pack(side="right", padx=8)
+
+    # ------------------------------------------------------------- left panel
+    def _build_left(self, body):
+        body.columnconfigure(0, weight=1)
+
+        rf = ttk.LabelFrame(body, text="Ship Roster", padding=6)
+        rf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        rf.columnconfigure(1, weight=1)
+        lbf = ttk.Frame(rf)
+        lbf.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self.roster_lb = tk.Listbox(lbf, height=7, exportselection=False, font=self.font_mono,
+                                    activestyle="dotbox")
+        sb = ttk.Scrollbar(lbf, orient="vertical", command=self.roster_lb.yview)
+        self.roster_lb.configure(yscrollcommand=sb.set)
+        self.roster_lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.roster_lb.bind("<Double-Button-1>", lambda _e: self.set_selected_as("attacker"))
+        ttk.Label(rf, text="[A] Attacker  [T] Target  |  Shields  T = turns used / Scale\n"
+                           "B = breaches, SHK = Shaken.  Double-click = set Attacker.",
+                  style="Info.TLabel").grid(
+            row=1, column=0, columnspan=4, sticky="w")
+        bf = ttk.Frame(rf)
+        bf.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 2))
+        ttk.Button(bf, text="Set as Attacker",
+                   command=lambda: self.set_selected_as("attacker")).pack(side="left")
+        ttk.Button(bf, text="Set as Target",
+                   command=lambda: self.set_selected_as("target")).pack(side="left", padx=4)
+        ttk.Button(bf, text="Swap", command=self.swap_selection).pack(side="left")
+
+        ttk.Label(rf, text="Attacker:").grid(row=3, column=0, sticky="w")
+        self.attacker_cb = ttk.Combobox(rf, textvariable=self.attacker_var, state="readonly")
+        self.attacker_cb.grid(row=3, column=1, columnspan=3, sticky="ew", pady=1)
+        ttk.Label(rf, text="Target:").grid(row=4, column=0, sticky="w")
+        self.target_cb = ttk.Combobox(rf, textvariable=self.target_var, state="readonly")
+        self.target_cb.grid(row=4, column=1, columnspan=3, sticky="ew", pady=1)
+        self.attacker_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_selection_change())
+        self.target_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_selection_change())
+
+        ef = ttk.Frame(rf)
+        ef.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        for text, cmd in (("New...", self.new_ship), ("Edit...", self.edit_ship),
+                          ("Duplicate", self.duplicate_ship), ("Delete", self.delete_ship)):
+            ttk.Button(ef, text=text, command=cmd, width=9).pack(side="left", padx=(0, 3))
+        xf = ttk.Frame(rf)
+        xf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(3, 0))
+        ttk.Button(xf, text="Export Ship...", command=self.export_ship).pack(side="left")
+        ttk.Button(xf, text="Import Ship(s)...", command=self.import_ships).pack(side="left",
+                                                                                padx=3)
+        ttk.Button(xf, text="Full Repair", command=self.full_repair_selected).pack(side="left")
+
+        gf = ttk.LabelFrame(body, text="Custom Ship / NPC Generator", padding=6)
+        gf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        gf.columnconfigure(1, weight=1)
+        ttk.Label(gf, text="Name (optional)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(gf, textvariable=self.gen_name_var).grid(row=0, column=1, columnspan=3,
+                                                           sticky="ew", pady=1)
+        ttk.Label(gf, text="Scale").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(gf, from_=1, to=7, textvariable=self.gen_scale_var, width=4,
+                    state="readonly").grid(row=1, column=1, sticky="w", pady=1)
+        ttk.Label(gf, text="Crew Quality").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(gf, textvariable=self.gen_quality_var, values=list(CREW_QUALITY),
+                     state="readonly", width=13).grid(row=2, column=1, sticky="w", pady=1)
+        self.gen_info = ttk.Label(gf, text="", style="Info.TLabel")
+        self.gen_info.grid(row=2, column=2, columnspan=2, sticky="w", padx=4)
+        ttk.Label(gf, text="Profile").grid(row=3, column=0, sticky="w")
+        ttk.Combobox(gf, textvariable=self.gen_profile_var, values=list(GENERATOR_PROFILES),
+                     state="readonly", width=20).grid(row=3, column=1, columnspan=2, sticky="w",
+                                                      pady=1)
+        gbf = ttk.Frame(gf)
+        gbf.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        ttk.Button(gbf, text="Generate NPC Ship", style="Accent.TButton",
+                   command=self.generate_npc).pack(side="left")
+        ttk.Button(gbf, text="Custom Ship Editor...", command=self.new_ship).pack(side="left",
+                                                                                  padx=4)
+        self._update_gen_info()
+
+        af = ttk.LabelFrame(body, text="Active Ship Status (Attacker)", padding=6)
+        af.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        af.columnconfigure(0, weight=1)
+        self.active_name_lbl = ttk.Label(af, text="-", style="Header.TLabel")
+        self.active_name_lbl.grid(row=0, column=0, sticky="w")
+        self.active_bar = ShieldBar(af)
+        self.active_bar.grid(row=1, column=0, sticky="ew", pady=3)
+        self.active_status_lbl = ttk.Label(af, text="", justify="left", wraplength=360)
+        self.active_status_lbl.grid(row=2, column=0, sticky="w")
+
+        tt = ttk.LabelFrame(body, text="Turn Tracker", padding=6)
+        tt.grid(row=3, column=0, sticky="ew")
+        tt.columnconfigure(0, weight=1)
+        self.turns_lbl = ttk.Label(tt, text="Turns used: 0 / 0", style="Bold.TLabel")
+        self.turns_lbl.grid(row=0, column=0, sticky="w")
+        self.turns_bar = ttk.Progressbar(tt, mode="determinate", maximum=1)
+        self.turns_bar.grid(row=1, column=0, sticky="ew", pady=3)
+        self.turns_info_lbl = ttk.Label(tt, text="", justify="left", wraplength=360)
+        self.turns_info_lbl.grid(row=2, column=0, sticky="w")
+        tbf = ttk.Frame(tt)
+        tbf.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(tbf, text="+1 Turn", command=lambda: self.adjust_turns(1)).pack(side="left")
+        ttk.Button(tbf, text="-1 Turn", command=lambda: self.adjust_turns(-1)).pack(side="left",
+                                                                                  padx=3)
+        ttk.Button(tbf, text="Reset Turns", command=self.reset_turns).pack(side="left")
+
+    # ----------------------------------------------------------- middle panel
+    def _build_middle(self, body):
+        body.columnconfigure(0, weight=1)
+
+        sf = ttk.LabelFrame(body, text="Bridge Station & Action Selector", padding=6)
+        sf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        sf.columnconfigure(1, weight=1)
+        ttk.Label(sf, text="Station").grid(row=0, column=0, sticky="w")
+        self.station_cb = ttk.Combobox(sf, textvariable=self.station_var,
+                                       values=list(BRIDGE_STATIONS), state="readonly")
+        self.station_cb.grid(row=0, column=1, sticky="ew", pady=1)
+        self.station_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_station_change())
+        ttk.Label(sf, text="Action").grid(row=1, column=0, sticky="w")
+        self.action_cb = ttk.Combobox(sf, textvariable=self.action_var, state="readonly")
+        self.action_cb.grid(row=1, column=1, sticky="ew", pady=1)
+        self.action_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_action_change())
+        self.kind_lbl = ttk.Label(sf, text="MAJOR", style="Major.TLabel")
+        self.kind_lbl.grid(row=0, column=2, rowspan=2, padx=(8, 0))
+        self.actor_lbl = ttk.Label(sf, text="", style="Bold.TLabel", wraplength=440)
+        self.actor_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        of = ttk.LabelFrame(body, text="Action Options", padding=6)
+        of.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        of.columnconfigure(1, weight=1)
+        ttk.Label(of, text="Weapon").grid(row=0, column=0, sticky="w")
+        self.weapon_cb = ttk.Combobox(of, textvariable=self.weapon_var, state="readonly")
+        self.weapon_cb.grid(row=0, column=1, sticky="ew", pady=1)
+        self.salvo_cb = ttk.Checkbutton(of, text="Torpedo Salvo (+3 Threat)",
+                                        variable=self.salvo_var)
+        self.salvo_cb.grid(row=1, column=1, sticky="w")
+        ttk.Label(of, text="Range to target").grid(row=2, column=0, sticky="w")
+        self.range_cb = ttk.Combobox(of, textvariable=self.range_var, values=RANGES,
+                                     state="readonly", width=10)
+        self.range_cb.grid(row=2, column=1, sticky="w", pady=1)
+        ttk.Label(of, text="Targeting Solution").grid(row=3, column=0, sticky="w")
+        tsf = ttk.Frame(of)
+        tsf.grid(row=3, column=1, sticky="w")
+        self.tsol_rb1 = ttk.Radiobutton(tsf, text="Re-roll worst d20", value="reroll",
+                                        variable=self.tsol_mode_var)
+        self.tsol_rb2 = ttk.Radiobutton(tsf, text="Choose system hit", value="choose",
+                                        variable=self.tsol_mode_var)
+        self.tsol_rb1.pack(side="left")
+        self.tsol_rb2.pack(side="left", padx=6)
+        ttk.Label(of, text="Scan for Weakness").grid(row=4, column=0, sticky="w")
+        swf = ttk.Frame(of)
+        swf.grid(row=4, column=1, sticky="w")
+        self.scan_rb1 = ttk.Radiobutton(swf, text="+2 Damage", value="damage",
+                                        variable=self.scan_mode_var)
+        self.scan_rb2 = ttk.Radiobutton(swf, text="Piercing", value="piercing",
+                                        variable=self.scan_mode_var)
+        self.scan_rb1.pack(side="left")
+        self.scan_rb2.pack(side="left", padx=6)
+        self.regen_cb = ttk.Checkbutton(of, text="Regenerate Shields: spend 1 Momentum for "
+                                                 "+2 Shields", variable=self.regen_boost_var)
+        self.regen_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        df = ttk.LabelFrame(body, text="Difficulty", padding=6)
+        df.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        df.columnconfigure(1, weight=1)
+        self.diff_total_lbl = ttk.Label(df, text="2", style="Diff.TLabel", width=3,
+                                        anchor="center")
+        self.diff_total_lbl.grid(row=0, column=0, rowspan=2, padx=(0, 8))
+        ttk.Label(df, text="Total = Base + Weapon mods + Context + GM Modifier",
+                  style="Info.TLabel").grid(row=0, column=1, sticky="w")
+        self.diff_parts_lbl = ttk.Label(df, text="", style="Bold.TLabel", wraplength=400,
+                                        justify="left")
+        self.diff_parts_lbl.grid(row=1, column=1, sticky="w")
+
+        hf = ttk.LabelFrame(body, text="Rule Hints", padding=6)
+        hf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        hf.columnconfigure(0, weight=1)
+        self.hints = tk.Text(hf, height=15, width=50, wrap="word", relief="flat",
+                             background="#f6f3fb",
+                             padx=6, pady=4, font=tkfont.nametofont("TkDefaultFont"))
+        self.hints.grid(row=0, column=0, sticky="ew")
+        self.hints.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
+        self.hints.tag_configure("key", font=self.font_bold)
+        self.hints.tag_configure("warn", foreground="#b03a2e")
+        self.hints.tag_configure("good", foreground="#1e7e46")
+        self.hints.configure(state="disabled")
+
+        rf = ttk.LabelFrame(body, text="Action Resolver", padding=6)
+        rf.grid(row=4, column=0, sticky="ew")
+        rf.columnconfigure(5, weight=1)
+        ttk.Label(rf, text="Crew Attribute").grid(row=0, column=0, sticky="w")
+        self.attr_sb = ttk.Spinbox(rf, from_=4, to=16, textvariable=self.crew_attr_var, width=4)
+        self.attr_sb.grid(row=0, column=1, sticky="w")
+        ttk.Label(rf, text="Department").grid(row=0, column=2, sticky="e", padx=(8, 2))
+        self.dept_sb = ttk.Spinbox(rf, from_=0, to=5, textvariable=self.crew_dept_var, width=4)
+        self.dept_sb.grid(row=0, column=3, sticky="w")
+        self.focus_cb = ttk.Checkbutton(rf, text="Focus (crit <= Dept)", variable=self.focus_var)
+        self.focus_cb.grid(row=0, column=4, columnspan=2, sticky="w", padx=(8, 0))
+        ttk.Label(rf, text="Dice pool (d20)").grid(row=1, column=0, sticky="w")
+        self.dice_sb = ttk.Spinbox(rf, from_=1, to=MAX_DICE_POOL, textvariable=self.dice_var,
+                                   width=4, state="readonly")
+        self.dice_sb.grid(row=1, column=1, sticky="w")
+        self.dice_cost_lbl = ttk.Label(rf, text="", style="Info.TLabel")
+        self.dice_cost_lbl.grid(row=1, column=2, columnspan=4, sticky="w", padx=(8, 0))
+        self.autopay_cb = ttk.Checkbutton(rf, text="Auto-pay bonus dice", variable=self.autopay_var)
+        self.autopay_cb.grid(row=2, column=0, columnspan=2, sticky="w")
+        self.assist_cb = ttk.Checkbutton(rf, text="Ship assists (System + Department)",
+                                         variable=self.assist_var)
+        self.assist_cb.grid(row=2, column=2, columnspan=4, sticky="w", padx=(8, 0))
+        mf = ttk.Frame(rf)
+        mf.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        self.auto_rb = ttk.Radiobutton(mf, text="Auto-roll dice", value="auto",
+                                       variable=self.mode_var)
+        self.auto_rb.pack(side="left")
+        self.manual_rb = ttk.Radiobutton(mf, text="Manual successes:", value="manual",
+                                         variable=self.mode_var)
+        self.manual_rb.pack(side="left", padx=(10, 2))
+        self.manual_sb = ttk.Spinbox(mf, from_=0, to=20, textvariable=self.manual_succ_var,
+                                     width=4)
+        self.manual_sb.pack(side="left")
+        of2 = ttk.Frame(rf)
+        of2.grid(row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        ttk.Label(of2, text="Opposed - defender successes:").pack(side="left")
+        self.opp_sb = ttk.Spinbox(of2, from_=0, to=20, textvariable=self.opp_var, width=4)
+        self.opp_sb.pack(side="left", padx=2)
+        self.opp_info_lbl = ttk.Label(of2, text="", style="Info.TLabel")
+        self.opp_info_lbl.pack(side="left", padx=4)
+        self.resolve_btn = ttk.Button(rf, text="ROLL & RESOLVE", style="Accent.TButton",
+                                      command=self.resolve_action)
+        self.resolve_btn.grid(row=5, column=0, columnspan=6, sticky="ew", pady=(8, 4), ipady=4)
+        self.result_lbl = ttk.Label(rf, text="", wraplength=440, justify="left")
+        self.result_lbl.grid(row=6, column=0, columnspan=6, sticky="w")
+
+    # ------------------------------------------------------------ right panel
+    def _build_right(self, body):
+        body.columnconfigure(0, weight=1)
+
+        tf = ttk.LabelFrame(body, text="Target Status", padding=6)
+        tf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        tf.columnconfigure(0, weight=1)
+        self.tgt_name_lbl = ttk.Label(tf, text="-", style="Header.TLabel")
+        self.tgt_name_lbl.grid(row=0, column=0, sticky="w")
+        self.tgt_info_lbl = ttk.Label(tf, text="", style="Info.TLabel", wraplength=430)
+        self.tgt_info_lbl.grid(row=1, column=0, sticky="w")
+        self.tgt_bar = ShieldBar(tf)
+        self.tgt_bar.grid(row=2, column=0, sticky="ew", pady=3)
+        self.tgt_res_lbl = ttk.Label(tf, text="", style="Bold.TLabel")
+        self.tgt_res_lbl.grid(row=3, column=0, sticky="w")
+        self.tgt_fx_lbl = ttk.Label(tf, text="", wraplength=430, justify="left")
+        self.tgt_fx_lbl.grid(row=4, column=0, sticky="w")
+        cf = ttk.Frame(tf)
+        cf.grid(row=5, column=0, sticky="w", pady=(3, 0))
+        ttk.Checkbutton(cf, text="Reserve Power", variable=self.tgt_reserve_var,
+                        command=lambda: self.toggle_target_flag("reserve_power",
+                                                                self.tgt_reserve_var)).pack(
+            side="left")
+        ttk.Checkbutton(cf, text="Shields Up", variable=self.tgt_shields_up_var,
+                        command=lambda: self.toggle_target_flag("shields_up",
+                                                                self.tgt_shields_up_var)).pack(
+            side="left", padx=6)
+        ttk.Checkbutton(cf, text="Weapons Armed", variable=self.tgt_armed_var,
+                        command=lambda: self.toggle_target_flag("weapons_armed",
+                                                                self.tgt_armed_var)).pack(
+            side="left")
+        shf = ttk.Frame(tf)
+        shf.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(shf, text="Shields:").pack(side="left")
+        ttk.Button(shf, text="-1", width=3,
+                   command=lambda: self.adjust_target_shields(-1)).pack(side="left", padx=1)
+        ttk.Button(shf, text="+1", width=3,
+                   command=lambda: self.adjust_target_shields(1)).pack(side="left", padx=1)
+        ttk.Spinbox(shf, from_=0, to=99, textvariable=self.tgt_set_shields_var, width=4).pack(
+            side="left", padx=(6, 1))
+        ttk.Button(shf, text="Set", width=4, command=self.set_target_shields).pack(side="left")
+        ttk.Button(shf, text="Restore Full", command=self.restore_target_shields).pack(
+            side="left", padx=4)
+
+        dfm = ttk.LabelFrame(body, text="Tactical Combat & Damage Resolver", padding=6)
+        dfm.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        dfm.columnconfigure(2, weight=1)
+        self.pending_lbl = ttk.Label(dfm, text="", wraplength=430, justify="left",
+                                     style="Good.TLabel")
+        self.pending_lbl.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(dfm, text="Weapon").grid(row=1, column=0, sticky="w")
+        self.dmg_weapon_cb = ttk.Combobox(dfm, textvariable=self.dmg_weapon_var, state="readonly")
+        self.dmg_weapon_cb.grid(row=1, column=1, columnspan=2, sticky="ew", pady=1)
+        self.dmg_weapon_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_damage_weapon_change())
+        ttk.Label(dfm, text="Base damage").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(dfm, from_=0, to=40, textvariable=self.dmg_base_var, width=5).grid(
+            row=2, column=1, sticky="w", pady=1)
+        self.dmg_auto_lbl = ttk.Label(dfm, text="", style="Info.TLabel")
+        self.dmg_auto_lbl.grid(row=2, column=2, sticky="w", padx=(6, 0))
+        ttk.Label(dfm, text="Bonus damage").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(dfm, from_=0, to=12, textvariable=self.dmg_bonus_var, width=5).grid(
+            row=3, column=1, sticky="w", pady=1)
+        self.dmg_cost_lbl = ttk.Label(dfm, text="", style="Info.TLabel")
+        self.dmg_cost_lbl.grid(row=3, column=2, sticky="w", padx=(6, 0))
+        ttk.Checkbutton(dfm, text="Piercing (ignore Resistance)", variable=self.pierce_var).grid(
+            row=4, column=0, columnspan=3, sticky="w")
+        self.devastate_cb = ttk.Checkbutton(dfm, text="Devastating Attack",
+                                            variable=self.devastate_var)
+        self.devastate_cb.grid(row=5, column=0, columnspan=3, sticky="w")
+        self.dmg_preview_lbl = ttk.Label(dfm, text="", wraplength=430, justify="left",
+                                         style="Bold.TLabel")
+        self.dmg_preview_lbl.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        dbf = ttk.Frame(dfm)
+        dbf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        dbf.columnconfigure(0, weight=1)
+        ttk.Button(dbf, text="APPLY DAMAGE TO TARGET", style="Damage.TButton",
+                   command=self.apply_damage).grid(row=0, column=0, sticky="ew", ipady=3)
+        ttk.Button(dbf, text="Clear Pending", command=self.clear_pending_attack).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0))
+
+        hf = ttk.LabelFrame(body, text="System Hit Generator & Shaken Resolver", padding=6)
+        hf.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        hf.columnconfigure(1, weight=1)
+        ttk.Button(hf, text=f"Roll System Hit (d{SYSTEM_HIT_DIE})",
+                   command=self.roll_system_hit_clicked).grid(row=0, column=0, sticky="w")
+        self.syshit_lbl = ttk.Label(hf, text="-", style="Bold.TLabel")
+        self.syshit_lbl.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Button(hf, text="Add Breach There", command=self.breach_last_hit).grid(row=0, column=2)
+        table = "  ".join(f"{lo}-{hi} {SYSTEM_ABBR[sysname]}"
+                          for lo, hi, sysname in SYSTEM_HIT_TABLE)
+        ttk.Label(hf, text=table, style="Info.TLabel").grid(row=1, column=0, columnspan=3,
+                                                             sticky="w", pady=2)
+        ttk.Button(hf, text="Open Shaken Resolver for Target...",
+                   command=self.shaken_resolver_clicked).grid(row=2, column=0, columnspan=3,
+                                                              sticky="w", pady=(2, 0))
+
+        bf = ttk.LabelFrame(body, text="Breach Tracker (Target)", padding=6)
+        bf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        for col, text in enumerate(("System", "Rating", "Breaches", "", "")):
+            ttk.Label(bf, text=text, style="Bold.TLabel").grid(row=0, column=col, sticky="w",
+                                                               padx=2)
+        self.breach_rows = {}
+        for i, sysname in enumerate(SYSTEMS, start=1):
+            ttk.Label(bf, text=sysname).grid(row=i, column=0, sticky="w", padx=2)
+            rating = ttk.Label(bf, text="-")
+            rating.grid(row=i, column=1, sticky="w", padx=2)
+            count = ttk.Label(bf, text="0", style="Bold.TLabel", width=12)
+            count.grid(row=i, column=2, sticky="w", padx=2)
+            ttk.Button(bf, text="-", width=3,
+                       command=lambda s=sysname: self.adjust_breach(s, -1)).grid(row=i, column=3)
+            ttk.Button(bf, text="+", width=3,
+                       command=lambda s=sysname: self.adjust_breach(s, 1)).grid(row=i, column=4)
+            self.breach_rows[sysname] = (rating, count)
+        self.breach_total_lbl = ttk.Label(bf, text="", wraplength=430, justify="left")
+        self.breach_total_lbl.grid(row=len(SYSTEMS) + 1, column=0, columnspan=5, sticky="w",
+                                   pady=(4, 0))
+
+        cf2 = ttk.LabelFrame(body, text="Complications & Effects (Target)", padding=6)
+        cf2.grid(row=4, column=0, sticky="ew")
+        cf2.columnconfigure(0, weight=1)
+        self.comp_lb = tk.Listbox(cf2, height=4, exportselection=False)
+        self.comp_lb.grid(row=0, column=0, columnspan=4, sticky="ew")
+        cbf = ttk.Frame(cf2)
+        cbf.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(cbf, text="Add Complication...", command=self.add_complication).pack(
+            side="left")
+        ttk.Button(cbf, text="Remove", command=self.remove_complication).pack(side="left", padx=3)
+        ttk.Button(cbf, text="Clear Temp Effects", command=self.clear_target_effects).pack(
+            side="left")
+
+    # ---------------------------------------------------------------- the log
+    def _build_log(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        self.log_text = ScrolledText(parent, height=9, wrap="word", font=self.font_mono,
+                                     state="disabled")
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        self.log_text.tag_configure("separator", foreground="#c76b00", font=self.font_bold)
+        self.log_text.tag_configure("alert", foreground="#b03a2e")
+        self.log_text.tag_configure("success", foreground="#1e7e46")
+        self.log_text.tag_configure("fail", foreground="#7d3c98")
+        self.log_text.tag_configure("pool", foreground="#1f5fbf")
+        bf = ttk.Frame(parent)
+        bf.grid(row=0, column=1, sticky="n", padx=(4, 0))
+        ttk.Button(bf, text="Clear Log", command=self.clear_log).pack(fill="x")
+        ttk.Button(bf, text="Export Log...", command=self.export_log).pack(fill="x", pady=3)
+
+    def _place_log_sash(self):
+        """Give the combat panels most of the height; the log keeps ~8 lines."""
+        try:
+            self.vpane.update_idletasks()
+            height = self.vpane.winfo_height()
+            if height > 1:
+                self.vpane.sashpos(0, max(300, height - 150))
+        except tk.TclError:
+            pass
+
+    def _bind_mousewheel(self):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind_all(seq, self._on_mousewheel, add="+")
+            # Scrolling over spinboxes / comboboxes scrolls the panel instead of
+            # silently changing their value.
+            for cls in ("TSpinbox", "TCombobox"):
+                self.root.bind_class(cls, seq, self._on_mousewheel_break)
+
+    def _on_mousewheel_break(self, event):
+        self._on_mousewheel(event)
+        return "break"
+
+    def _on_mousewheel(self, event):
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if widget is None or isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview)):
+            return
+        while widget is not None and not isinstance(widget, ScrollableFrame):
+            widget = getattr(widget, "master", None)
+        if widget is None:
+            return
+        if getattr(event, "num", None) == 4:
+            steps = -1
+        elif getattr(event, "num", None) == 5:
+            steps = 1
+        else:
+            delta = event.delta
+            steps = -max(1, abs(delta) // 120) if delta > 0 else max(1, abs(delta) // 120)
+        widget.scroll(steps * 2)
+
+    # ============================================================ properties
+    def ship_by_name(self, name):
+        return next((s for s in self.ships if s.name == name), None)
+
+    @property
+    def attacker(self):
+        return self.ship_by_name(self.attacker_var.get())
+
+    @property
+    def target(self):
+        return self.ship_by_name(self.target_var.get())
+
+    def current_action(self):
+        return BRIDGE_STATIONS.get(self.station_var.get(), {}).get(self.action_var.get())
+
+    def selected_weapon(self):
+        ship = self.attacker
+        return ship.weapon(self.weapon_var.get()) if ship else None
+
+    def unique_name(self, base: str) -> str:
+        names = {s.name for s in self.ships}
+        if base not in names:
+            return base
+        i = 2
+        while f"{base} ({i})" in names:
+            i += 1
+        return f"{base} ({i})"
+
+    def selected_roster_ship(self):
+        sel = self.roster_lb.curselection()
+        if sel and sel[0] < len(self.ships):
+            return self.ships[sel[0]]
+        return None
+
+    # =========================================================== dialogs api
+    # (thin wrappers so behaviour can be scripted / tested)
+    def ask_yes_no(self, title, message):
+        return messagebox.askyesno(title, message, parent=self.root)
+
+    def ask_yes_no_cancel(self, title, message):
+        return messagebox.askyesnocancel(title, message, parent=self.root)
+
+    def ask_choice(self, title, prompt, options, default=None):
+        return ChoiceDialog.ask(self.root, title, prompt, options, default)
+
+    def ask_string(self, title, prompt, initial=""):
+        return simpledialog.askstring(title, prompt, initialvalue=initial, parent=self.root)
+
+    def show_error(self, title, message):
+        messagebox.showerror(title, message, parent=self.root)
+
+    def show_info(self, title, message):
+        messagebox.showinfo(title, message, parent=self.root)
+
+    def ask_shaken_result(self, ship, reason):
+        return ShakenDialog.ask(self.root, ship.name, reason, self.rng)
+
+    # ================================================================ logging
+    def log(self, message, tag="info"):
+        if tag == "separator":
+            line = f"{message}\n"
+        else:
+            line = f"[{datetime.datetime.now():%H:%M:%S}] [R{self.round}] {message}\n"
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line, tag)
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def clear_log(self):
+        if self.ask_yes_no("Clear Log", "Clear the combat history log?"):
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.configure(state="disabled")
+
+    def export_log(self):
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Export Combat Log", defaultextension=".txt",
+            initialfile=f"sta2e_combat_log_{datetime.date.today():%Y%m%d}.txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.log_text.get("1.0", "end"))
+        except OSError as exc:
+            self.show_error("Export Log", f"Could not write log:\n{exc}")
+            return
+        self.log(f"Combat log exported to {path}.")
+
+    # ================================================================== pools
+    def adjust_pool(self, kind, delta):
+        if kind == "threat":
+            self.threat = max(0, self.threat + delta)
+            self.log(f"GM adjusted Threat {delta:+d} -> {self.threat}.", "pool")
+        else:
+            self.momentum = clamp(self.momentum + delta, 0, MOMENTUM_MAX)
+            self.log(f"GM adjusted Momentum {delta:+d} -> {self.momentum}.", "pool")
+        self.changed()
+
+    def add_threat(self, amount, reason):
+        self.threat = max(0, self.threat + amount)
+        self.log(f"Threat {amount:+d} ({reason}) -> {self.threat}.", "pool")
+
+    def add_momentum(self, amount, reason):
+        new = self.momentum + amount
+        if new > MOMENTUM_MAX:
+            self.log(f"Momentum pool full - {new - MOMENTUM_MAX} Momentum lost.", "alert")
+            new = MOMENTUM_MAX
+        self.momentum = max(0, new)
+        self.log(f"Momentum {amount:+d} ({reason}) -> {self.momentum}.", "pool")
+
+    def gain_for_side(self, ship, amount, reason):
+        if amount <= 0:
+            return
+        if ship.side == "Player":
+            self.add_momentum(amount, reason)
+        else:
+            self.add_threat(amount, f"{ship.name}: {reason}")
+
+    def pay_for_side(self, ship, cost, reason) -> bool:
+        """Players spend Momentum (shortfall is paid by adding Threat); NPCs spend Threat."""
+        if cost <= 0:
+            return True
+        if ship.side == "Player":
+            from_m = min(self.momentum, cost)
+            self.momentum -= from_m
+            shortfall = cost - from_m
+            msg = f"{ship.name} pays {cost} for {reason}: {from_m} Momentum"
+            if shortfall:
+                self.threat += shortfall
+                msg += f" + {shortfall} Threat added (Momentum short)"
+            self.log(msg + f". Momentum {self.momentum}, Threat {self.threat}.", "pool")
+            return True
+        if cost > self.threat:
+            if not self.ask_yes_no("Insufficient Threat",
+                                   f"{ship.name} needs {cost} Threat for {reason}, but the "
+                                   f"pool has only {self.threat}.\n\nProceed anyway?"):
+                return False
+            self.log(f"GM override: {ship.name} pays {reason} with insufficient Threat.", "alert")
+        self.threat = max(0, self.threat - cost)
+        self.log(f"{ship.name} spends {cost} Threat for {reason} -> {self.threat}.", "pool")
+        return True
+
+    # ============================================================== selection
+    def on_station_change(self):
+        actions = list(BRIDGE_STATIONS.get(self.station_var.get(), {}))
+        self.action_cb.configure(values=actions)
+        if self.action_var.get() not in actions:
+            self.action_var.set(actions[0] if actions else "")
+        self.on_action_change()
+
+    def on_action_change(self):
+        self.result_lbl.configure(text="", style="TLabel")
+        self.refresh_all()
+
+    def on_selection_change(self):
+        self.refresh_all()
+
+    def set_selected_as(self, role):
+        ship = self.selected_roster_ship()
+        if ship is None:
+            return
+        (self.attacker_var if role == "attacker" else self.target_var).set(ship.name)
+        self.refresh_all()
+
+    def swap_selection(self):
+        a, t = self.attacker_var.get(), self.target_var.get()
+        self.attacker_var.set(t)
+        self.target_var.set(a)
+        self.refresh_all()
+
+    def _on_option_change(self):
+        if not self._refreshing:
+            self._refresh_middle()
+
+    def _on_damage_option_change(self):
+        if not self._refreshing:
+            self._refresh_damage_preview()
+
+    def _update_gen_info(self):
+        a, d = CREW_QUALITY.get(self.gen_quality_var.get(), CREW_QUALITY[DEFAULT_CREW_QUALITY])
+        if hasattr(self, "gen_info"):
+            self.gen_info.configure(text=f"Attr {a} / Dept {d}")
+
+    # ================================================================ refresh
+    def changed(self):
+        self.dirty = True
+        self.refresh_all()
+
+    def refresh_all(self):
+        if self._refreshing:
+            return
+        self._refreshing = True
+        try:
+            self._refresh_top()
+            self._refresh_selectors()
+            self._refresh_roster()
+            self._refresh_left_status()
+            self._refresh_middle()
+            self._refresh_right()
+        finally:
+            self._refreshing = False
+
+    def _refresh_top(self):
+        self.threat_lbl.configure(text=str(self.threat))
+        self.momentum_lbl.configure(text=str(self.momentum))
+        self.round_lbl.configure(text=str(self.round))
+        self.file_lbl.configure(text=f"{os.path.basename(self.data_file)}"
+                                     f"{'  (unsaved changes)' if self.dirty else ''}")
+        self.root.title(f"{APP_NAME}{' *' if self.dirty else ''}")
+
+    def _refresh_selectors(self):
+        names = [s.name for s in self.ships]
+        self.attacker_cb.configure(values=names)
+        self.target_cb.configure(values=names)
+        if self.attacker_var.get() not in names:
+            players = [s.name for s in self.ships if s.side == "Player"]
+            self.attacker_var.set(players[0] if players else (names[0] if names else ""))
+        if self.target_var.get() not in names:
+            others = [n for n in names if n != self.attacker_var.get()]
+            self.target_var.set(others[0] if others else "")
+        ship = self.attacker
+        # Crew defaults follow the attacker's Crew Quality when the attacker changes.
+        if ship is not None and ship.name != self._last_attacker:
+            a, d = ship.crew_ratings()
+            self.crew_attr_var.set(a)
+            self.crew_dept_var.set(d)
+            self._last_attacker = ship.name
+        weapons = [w.name for w in ship.weapons] if ship else []
+        self.weapon_cb.configure(values=weapons)
+        if self.weapon_var.get() not in weapons:
+            self.weapon_var.set(weapons[0] if weapons else "")
+        src = self.ship_by_name(self.pending_attack["attacker"]) if self.pending_attack else ship
+        dvals = ([w.name for w in src.weapons] if src else []) + [CUSTOM_WEAPON]
+        if self.pending_attack and self.pending_attack["label"] not in dvals:
+            dvals.insert(0, self.pending_attack["label"])
+        self.dmg_weapon_cb.configure(values=dvals)
+        if self.dmg_weapon_var.get() not in dvals:
+            self.dmg_weapon_var.set(CUSTOM_WEAPON)
+
+    def _refresh_roster(self):
+        sel = self.roster_lb.curselection()
+        self.roster_lb.delete(0, "end")
+        a, t = self.attacker_var.get(), self.target_var.get()
+        for s in self.ships:
+            mark = "[A]" if s.name == a else ("[T]" if s.name == t else "   ")
+            side = "PC " if s.side == "Player" else "NPC"
+            extra = f" B{s.total_breaches()}" if s.total_breaches() else ""
+            extra += " SHK" if s.shaken else ""
+            self.roster_lb.insert(
+                "end", f"{mark} {s.name[:18]:<18} {side} S{s.scale} "
+                       f"{s.shields:>2}/{s.shields_max:<2} T{s.turns_used}/{s.scale}{extra}")
+        if sel and sel[0] < len(self.ships):
+            self.roster_lb.selection_set(sel[0])
+
+    def _ship_status_text(self, s):
+        a, d = s.crew_ratings()
+        yes = lambda flag: "Yes" if flag else "No"   # noqa: E731
+        lines = [
+            f"{s.ship_class or 'Unknown class'}",
+            f"Side: {s.side}   Scale: {s.scale}   Crew: {s.crew_quality} (Attr {a} / Dept {d})",
+            f"Resistance: {s.resistance}"
+            + (f" {s.resistance_bonus:+d} = {s.effective_resistance}" if s.resistance_bonus else ""),
+            f"Reserve Power: {yes(s.reserve_power)}   Shields Up: {yes(s.shields_up)}   "
+            f"Weapons Armed: {yes(s.weapons_armed)}",
+            "Systems: " + ", ".join(f"{SYSTEM_ABBR[k]} {v}" for k, v in s.systems.items()),
+            "Depts: " + ", ".join(f"{k[:5]} {v}" for k, v in s.departments.items()),
+        ]
+        breaches = [f"{k} {v}" for k, v in s.breaches.items() if v]
+        lines.append("Breaches: " + (", ".join(breaches) if breaches else "none"))
+        fx = s.active_effects()
+        lines.append("Effects: " + (", ".join(fx) if fx else "none"))
+        if s.complications:
+            lines.append("Complications: " + "; ".join(s.complications))
+        if s.weapons:
+            lines.append("Weapons: " + "; ".join(w.describe() for w in s.weapons))
+        return "\n".join(lines)
+
+    def _refresh_left_status(self):
+        s = self.attacker
+        if s is None:
+            self.active_name_lbl.configure(text="No ship selected")
+            self.active_bar.set_value(0, 0)
+            self.active_status_lbl.configure(text="")
+            self.turns_lbl.configure(text="Turns used: - / -")
+            self.turns_bar.configure(maximum=1, value=0)
+            self.turns_info_lbl.configure(text="")
+            return
+        self.active_name_lbl.configure(text=s.name)
+        self.active_bar.set_value(s.shields, s.shields_max)
+        self.active_status_lbl.configure(text=self._ship_status_text(s))
+        over = s.turns_used > s.scale
+        self.turns_lbl.configure(text=f"Turns used: {s.turns_used} / {s.scale}"
+                                      + ("  - OVER SCALE LIMIT!" if over else ""),
+                                 style="Alert.TLabel" if s.turns_used >= s.scale else "Bold.TLabel")
+        self.turns_bar.configure(maximum=max(1, s.scale), value=min(s.turns_used, s.scale))
+        info = "Systems used this round: " + (", ".join(s.systems_used) if s.systems_used
+                                              else "none")
+        if s.side == "NPC":
+            info += "\nNPC rule: re-using a system in the same round costs 1 Threat."
+        if s.brace_for_impact:
+            info += "\nBRACE FOR IMPACT: no Major Action on the next turn."
+        self.turns_info_lbl.configure(text=info)
+
+    def _refresh_middle(self):
+        adef = self.current_action()
+        name = self.action_var.get()
+        ship, target = self.attacker, self.target
+        if adef is None:
+            return
+        self.kind_lbl.configure(text=adef["kind"].upper(),
+                                style="Major.TLabel" if adef["kind"] == "Major" else "Minor.TLabel")
+        self.actor_lbl.configure(
+            text=f"Acting: {ship.name if ship else '-'}   ->   Target: "
+                 f"{target.name if target else '-'}")
+        weapon = self.selected_weapon() if name == "Fire" else None
+        is_fire = name == "Fire"
+        set_enabled(self.weapon_cb, is_fire)
+        set_enabled(self.salvo_cb, is_fire and weapon is not None and weapon.wtype == "Torpedo")
+        tsol = is_fire and ship is not None and ship.targeting_solution
+        set_enabled(self.tsol_rb1, tsol)
+        set_enabled(self.tsol_rb2, tsol)
+        set_enabled(self.scan_rb1, name == "Scan for Weakness")
+        set_enabled(self.scan_rb2, name == "Scan for Weakness")
+        set_enabled(self.regen_cb, name == "Regenerate Shields")
+
+        rolls = adef["roll"]
+        manual = self.mode_var.get() == "manual"
+        for w in (self.attr_sb, self.dept_sb, self.focus_cb, self.dice_sb, self.autopay_cb,
+                  self.auto_rb, self.manual_rb):
+            set_enabled(w, rolls)
+        set_enabled(self.assist_cb, rolls and adef["assist"] is not None)
+        set_enabled(self.manual_sb, rolls and manual)
+        defense = self._defense_mode(target) if (adef["attack"] and target is not None
+                                                 and target is not ship) else None
+        set_enabled(self.opp_sb, bool(defense) and manual)
+        if defense:
+            self.opp_info_lbl.configure(text="(auto-rolled)" if not manual else "(enter value)")
+        else:
+            self.opp_info_lbl.configure(text="(not opposed)")
+        if not rolls:
+            self.resolve_btn.configure(text="EXECUTE ACTION")
+        else:
+            self.resolve_btn.configure(text="RESOLVE (MANUAL SUCCESSES)" if manual
+                                       else "ROLL & RESOLVE")
+
+        total, parts = compute_difficulty(name, adef, ship, weapon, self.range_var.get(),
+                                          int_var_value(self.gm_mod_var, 0))
+        self.diff_total_lbl.configure(text="-" if total is None else str(total))
+        self.diff_parts_lbl.configure(text=format_difficulty(total, parts))
+        dice = int_var_value(self.dice_var, 2)
+        cost = bonus_dice_cost(dice)
+        payer = "Threat" if ship is not None and ship.side == "NPC" else "Momentum"
+        self.dice_cost_lbl.configure(
+            text=f"Bonus dice cost: {cost} {payer}" if cost else "3rd d20 = 1, 4th = 2, 5th = 3")
+        self._write_hints(self._hint_lines(name, adef, ship, target, weapon, total))
+
+    def _write_hints(self, lines):
+        self.hints.configure(state="normal")
+        self.hints.delete("1.0", "end")
+        for text, tag in lines:
+            self.hints.insert("end", text + "\n", tag)
+        self.hints.configure(state="disabled")
+
+    def _defense_mode(self, target):
+        if target is None:
+            return None
+        if target.evasive:
+            return "evasive"
+        if target.defensive_fire:
+            return "defensive"
+        return None
+
+    def _hint_lines(self, name, adef, ship, target, weapon, total):
+        L = []
+        station = self.station_var.get()
+        L.append((f"{name.upper()}  -  {station}  -  {adef['kind']} Action"
+                  + ("  (uses a turn)" if adef["kind"] == "Major" else "  (does not use a turn)"),
+                  "head"))
+        a_val, d_val = int_var_value(self.crew_attr_var, 10), int_var_value(self.crew_dept_var, 3)
+        if adef["attr"] and adef["dept"]:
+            crit = max(1, d_val) if self.focus_var.get() else 1
+            L.append((f"{adef['task_label']}: {adef['attr']} + {adef['dept']}   ->  crew TN "
+                      f"{a_val + d_val} "
+                      f"({a_val} + {d_val}), crit on {crit} or less", "key"))
+        elif adef["roll"]:
+            L.append(("Task: Attribute + Department of the assisted task", "key"))
+        if adef["assist"]:
+            s_sys, s_dept = adef["assist"]
+            if ship:
+                sv, dv = ship.systems.get(s_sys, 0), ship.departments.get(s_dept, 0)
+                L.append((f"Ship Assist: {s_sys} + {s_dept}  ->  TN {sv + dv} ({sv} + {dv}), "
+                          f"crit on {max(1, dv)} or less", "key"))
+                if ship.breaches.get(s_sys):
+                    L.append((f"  ! {s_sys} has {ship.breaches[s_sys]} breach(es) - apply "
+                              "damaged-system penalties via the GM Modifier if your table "
+                              "uses them.", "warn"))
+            else:
+                L.append((f"Ship Assist: {s_sys} + {s_dept}", "key"))
+        else:
+            L.append(("Ship Assist: none", ""))
+        L.append((f"Ship system used: {adef['system']}", ""))
+        if total is not None:
+            L.append((f"Difficulty: {total}", "key"))
+        L.append(("Rule: " + adef["reminder"], ""))
+
+        if name == "Fire":
+            if weapon:
+                L.append(("Weapon: " + weapon.describe(), "key"))
+                for q in weapon.qualities:
+                    has_x, desc = WEAPON_QUALITIES.get(q, (False, ""))
+                    label = f"{q} {weapon.qualities[q]}" if has_x else q
+                    L.append((f"  - {label}: {desc}", ""))
+                cost = 3 if self.salvo_var.get() else 1
+                if weapon.wtype == "Torpedo":
+                    who = ("adds" if ship and ship.side == "Player" else "spends")
+                    L.append((f"Cost: torpedo {who} {cost} Threat"
+                              + (" (Salvo)" if self.salvo_var.get() else ""), "warn"))
+            elif ship:
+                L.append((f"! {ship.name} has no weapons - add some in the ship editor.", "warn"))
+        if name == "Direct":
+            L.append(("Cost: 1 Momentum (NPC: 1 Threat).", "warn"))
+
+        alerts = []
+        if ship:
+            if adef["kind"] == "Major":
+                if ship.turns_used >= ship.scale:
+                    alerts.append(f"Turn budget used up: {ship.turns_used}/{ship.scale} "
+                                  f"(Scale {ship.scale}).")
+                if ship.side == "NPC" and adef["system"] in ship.systems_used:
+                    alerts.append(f"{adef['system']} already used this round - costs 1 Threat "
+                                  "to re-use.")
+                if ship.brace_for_impact:
+                    alerts.append("Brace for Impact: this ship cannot take a Major Action now.")
+            if adef["requires_power"] and not ship.reserve_power:
+                alerts.append("Requires Reserve Power - the ship has none (Regain Power first).")
+            if name == "Warp" and not ship.warp_prepared:
+                alerts.append("Warp requires a prior Prepare (Warp) minor action.")
+            if name == "Fire" and not ship.weapons_armed:
+                alerts.append("Weapons are not armed (use Tactical > Prepare).")
+            if name == "Fire" and weapon and RANGES.index(self.range_var.get()) > \
+                    RANGES.index(weapon.range):
+                alerts.append(f"Target range ({self.range_var.get()}) exceeds weapon range "
+                              f"({weapon.range}).")
+            if name in ("Ram", "Tractor Beam") and range_penalty(self.range_var.get()) > 0:
+                alerts.append(f"{name} requires the target within Close range.")
+            if name in ("Targeting Solution", "Reveal", "Launch Probe") and \
+                    self.range_var.get() == "Extreme":
+                alerts.append(f"{name} works only within Long range.")
+            if adef["attack"] and ship.evasive:
+                alerts.append("This ship is using Evasive Action: its attacks are +1 Difficulty "
+                              "(included).")
+            if adef["attack"] and ship.attack_pattern:
+                L.append(("Attack Pattern active: +1 helm assist die on this attack.", "good"))
+            if name == "Fire" and ship.calibrated_weapons:
+                L.append(("Weapons calibrated: +1 Damage on this attack.", "good"))
+            if name == "Fire" and ship.targeting_solution:
+                L.append(("Targeting Solution ready: re-roll 1d20 OR choose the system hit.",
+                          "good"))
+            if adef["sensor"] and ship.calibrated_sensors:
+                L.append(("Sensors calibrated: re-roll 1d20 / ignore 1 trait on this task.",
+                          "good"))
+            if ship.rerouted_power and ship.rerouted_power == adef["system"]:
+                L.append((f"Rerouted Reserve Power boosts this {adef['system']} task - apply its "
+                          "benefit (it is consumed).", "good"))
+            if ship.jammed and adef["system"] in ("Communications", "Sensors"):
+                alerts.append("Ship is Jammed: +1 Difficulty (included).")
+        if target and ship and target is not ship:
+            if adef["attack"]:
+                mode = self._defense_mode(target)
+                if mode == "evasive":
+                    alerts.append(f"{target.name} is using Evasive Action: OPPOSED task - "
+                                  "defender rolls Daring + Conn (assist Structure + Conn). The "
+                                  "attacker must also beat the defender's successes.")
+                elif mode == "defensive":
+                    alerts.append(f"{target.name} is using Defensive Fire: OPPOSED task - "
+                                  "defender rolls Daring + Security (assist Weapons + Security).")
+                if target.weakness_scanned:
+                    L.append((f"{target.name} was scanned for weakness: "
+                              + ("+2 Damage" if target.weakness_scanned == "damage"
+                                 else "Piercing") + " on this attack.", "good"))
+                if target.effective_resistance:
+                    L.append((f"Target Resistance {target.effective_resistance}"
+                              + (" (Modulated Shields)" if target.resistance_bonus else ""), ""))
+        elif adef["needs_target"]:
+            alerts.append("Select a target ship (different from the acting ship).")
+        for a in alerts:
+            L.append(("! " + a, "warn"))
+        return L
+
+    def _refresh_right(self):
+        t = self.target
+        if t is None:
+            self.tgt_name_lbl.configure(text="No target selected")
+            self.tgt_info_lbl.configure(text="")
+            self.tgt_bar.set_value(0, 0)
+            self.tgt_res_lbl.configure(text="")
+            self.tgt_fx_lbl.configure(text="")
+            for rating, count in self.breach_rows.values():
+                rating.configure(text="-")
+                count.configure(text="0")
+            self.breach_total_lbl.configure(text="")
+            self.comp_lb.delete(0, "end")
+        else:
+            a, d = t.crew_ratings()
+            self.tgt_name_lbl.configure(text=t.name)
+            self.tgt_info_lbl.configure(
+                text=f"{t.ship_class or 'Unknown class'} | {t.side} | Scale {t.scale} | "
+                     f"Crew {t.crew_quality} ({a}/{d}) | Turns {t.turns_used}/{t.scale}")
+            self.tgt_bar.set_value(t.shields, t.shields_max)
+            self.tgt_res_lbl.configure(
+                text=f"Resistance: {t.resistance}"
+                     + (f" {t.resistance_bonus:+d} (Modulated) = {t.effective_resistance}"
+                        if t.resistance_bonus else "")
+                     + f"    Shaken thresholds: <{t.shields_max * 0.5:g} / <{t.shields_max * 0.25:g}")
+            fx = t.active_effects()
+            self.tgt_fx_lbl.configure(text="Effects: " + (", ".join(fx) if fx else "none"),
+                                      style="Alert.TLabel" if t.shaken else "TLabel")
+            self.tgt_reserve_var.set(t.reserve_power)
+            self.tgt_shields_up_var.set(t.shields_up)
+            self.tgt_armed_var.set(t.weapons_armed)
+            self.tgt_set_shields_var.set(t.shields)
+            for sysname, (rating, count) in self.breach_rows.items():
+                rating.configure(text=str(t.systems.get(sysname, 0)))
+                n = t.breaches.get(sysname, 0)
+                dev = " (Devast.)" if sysname in t.devastating_systems else ""
+                count.configure(text=f"{n}{dev}", style="Alert.TLabel" if n else "Bold.TLabel")
+            total = t.total_breaches()
+            msg = f"Total breaches: {total}   (Scale {t.scale})"
+            if total and total >= t.scale:
+                msg += "\n! Breaches have reached the ship's Scale - check the rulebook for " \
+                       "disabled systems / ship destruction."
+            self.breach_total_lbl.configure(text=msg,
+                                            style="Alert.TLabel" if total >= t.scale and total
+                                            else "TLabel")
+            self.comp_lb.delete(0, "end")
+            for c in t.complications:
+                self.comp_lb.insert("end", c)
+        self.syshit_lbl.configure(text=self.last_system_hit or "-")
+        pa = self.pending_attack
+        if pa:
+            bits = [f"PENDING HIT: {pa['attacker']} -> {pa['target']} with {pa['label']}"]
+            if pa["calibrate"]:
+                bits.append(f"Calibrated +{pa['calibrate']}")
+            if pa["scan_damage"]:
+                bits.append(f"Weakness +{pa['scan_damage']}")
+            if pa["choose_system"]:
+                bits.append("Targeting Solution: choose system")
+            if pa["ram"]:
+                bits.append("Collision: both ships take damage")
+            self.pending_lbl.configure(text=" | ".join(bits))
+        else:
+            self.pending_lbl.configure(text="No pending attack - damage can still be applied "
+                                            "manually to the selected target.")
+        self._refresh_damage_preview()
+
+    def _damage_weapon(self):
+        if self.pending_attack:
+            return self.pending_attack["weapon"]
+        ship = self.attacker
+        return ship.weapon(self.dmg_weapon_var.get()) if ship else None
+
+    def _damage_payer_is_npc(self):
+        pa = self.pending_attack
+        payer = self.ship_by_name(pa["attacker"]) if pa else self.attacker
+        return payer is not None and payer.side == "NPC"
+
+    def _refresh_damage_preview(self):
+        t = self.target
+        weapon = self._damage_weapon()
+        pa = self.pending_attack
+        calib = pa["calibrate"] if pa else 0
+        scan = pa["scan_damage"] if pa else 0
+        self.dmg_auto_lbl.configure(text=f"+{calib} calibrated, +{scan} weakness" if pa else "")
+        bonus = int_var_value(self.dmg_bonus_var, 0)
+        each = bonus_damage_cost_each(weapon)
+        dev_cost = devastating_attack_cost(weapon)
+        cost = bonus * each + (dev_cost if self.devastate_var.get() else 0)
+        payer = "Threat" if self._damage_payer_is_npc() else "Momentum"
+        self.dmg_cost_lbl.configure(text=f"{each} {payer} per +1  (total cost: {cost})")
+        self.devastate_cb.configure(text=f"Devastating Attack ({dev_cost} {payer}: +1 extra "
+                                         "system hit / breach)")
+        if t is None:
+            self.dmg_preview_lbl.configure(text="Select a target.")
+            return
+        raw = int_var_value(self.dmg_base_var, 0) + calib + scan + bonus
+        out = resolve_shield_damage(t.shields, t.shields_max, raw, t.effective_resistance,
+                                    self.pierce_var.get())
+        res_txt = "Piercing" if self.pierce_var.get() else f"Resistance {out.resistance_applied}"
+        text = (f"Raw {raw} - {res_txt} = {out.final_damage} damage  ->  Shields "
+                f"{out.shields_before} -> {out.shields_after}/{t.shields_max}")
+        consequences = [f"SHAKEN ({r})" for r in out.shaken_reasons]
+        consequences += [f"BREACH ({r})" for r in out.breach_reasons]
+        if consequences:
+            text += "\nPredicted: " + "; ".join(consequences)
+        self.dmg_preview_lbl.configure(text=text)
+
+    # ============================================================ turn logic
+    def adjust_turns(self, delta):
+        ship = self.attacker
+        if ship is None:
+            return
+        ship.turns_used = max(0, ship.turns_used + delta)
+        if delta > 0 and ship.brace_for_impact:
+            ship.brace_for_impact = False
+            self.log(f"{ship.name} spends its turn braced (no Major Action). Brace for Impact "
+                     "cleared.")
+        self.log(f"{ship.name}: turns used manually set to {ship.turns_used}/{ship.scale}.")
+        if ship.turns_used > ship.scale:
+            self.log(f"WARNING: {ship.name} exceeds its Scale turn limit "
+                     f"({ship.turns_used}/{ship.scale}).", "alert")
+        self.changed()
+
+    def reset_turns(self):
+        ship = self.attacker
+        if ship is None:
+            return
+        ship.turns_used = 0
+        ship.systems_used = []
+        self.log(f"{ship.name}: turn counter reset.")
+        self.changed()
+
+    def end_round(self):
+        ended = self.round
+        for ship in self.ships:
+            for eff in list(ship.persistent_effects):
+                self._inflict_damage(ship, eff["amount"], True,
+                                     f"Persistent damage ({eff['source']})")
+        for ship in self.ships:
+            ship.reset_round()
+        self.log(f"--- END OF ROUND {ended} ---", "separator")
+        self.round += 1
+        self.log(f"Round {self.round} begins: turn counters, Modulate Shields, Evasive Action, "
+                 "Defensive Fire, Attack Pattern, Jammed, Slowed and Shaken flags reset.")
+        self.changed()
+
+    # ========================================================== action logic
+    def compute_current_difficulty(self):
+        name = self.action_var.get()
+        weapon = self.selected_weapon() if name == "Fire" else None
+        return compute_difficulty(name, self.current_action(), self.attacker, weapon,
+                                  self.range_var.get(), int_var_value(self.gm_mod_var, 0))
+
+    def resolve_action(self):
+        ship = self.attacker
+        if ship is None:
+            self.show_error("No acting ship", "Select an Attacker / acting ship first.")
+            return
+        name = self.action_var.get()
+        adef = self.current_action()
+        if adef is None:
+            return
+        target = self.target
+        if adef["needs_target"] and (target is None or target is ship):
+            self.show_error("No target", f"{name} needs a target ship different from the "
+                                         "acting ship.")
+            return
+        weapon = self.selected_weapon() if name == "Fire" else None
+        if name == "Fire" and weapon is None:
+            self.show_error("No weapon", f"{ship.name} has no weapon selected. Add weapons in "
+                                         "the ship editor.")
+            return
+        reuse_threat = self._precheck_action(ship, name, adef, weapon)
+        if reuse_threat is None:
+            return
+        difficulty, _parts = self.compute_current_difficulty()
+        if not self._pay_action_costs(ship, name, adef, weapon, reuse_threat):
+            return
+        outcome = None
+        if adef["roll"]:
+            outcome = self._perform_task(ship, name, adef, target, difficulty)
+        else:
+            self.result_lbl.configure(text=f"{name} executed.", style="Good.TLabel")
+            self.log(f"{ship.name}: {name} ({adef['kind']} Action).")
+        if adef["requires_power"] and ship.reserve_power:
+            ship.reserve_power = False
+            self.log(f"{ship.name} consumes its Reserve Power.")
+        if adef["kind"] == "Major":
+            self._consume_turn(ship, adef["system"])
+        self._apply_effect(ship, name, adef, target, weapon, outcome)
+        self.changed()
+
+    def _precheck_action(self, ship, name, adef, weapon):
+        """Warnings / confirmations. Returns Threat to spend for system re-use, or None to abort."""
+        reuse_threat = 0
+        band = self.range_var.get()
+        if adef["kind"] == "Major":
+            if ship.brace_for_impact and not self.ask_yes_no(
+                    "Brace for Impact!", f"{ship.name} is bracing for impact and cannot take a "
+                                         "Major Action this turn.\n\nOverride and act anyway?"):
+                return None
+            if ship.turns_used >= ship.scale:
+                if not self.ask_yes_no(
+                        "Turn budget exceeded",
+                        f"{ship.name} has already used {ship.turns_used}/{ship.scale} turns "
+                        f"this round (Scale {ship.scale}).\n\nTake another turn anyway?"):
+                    return None
+                self.log(f"WARNING: {ship.name} exceeds its Scale turn limit (GM override).",
+                         "alert")
+            sysname = adef["system"]
+            if ship.side == "NPC" and sysname in ship.systems_used:
+                ans = self.ask_yes_no_cancel(
+                    "System already used",
+                    f"{ship.name} already used its {sysname} system this round.\n\n"
+                    "Yes = spend 1 Threat to use it again\n"
+                    "No = proceed WITHOUT spending Threat (GM override)\n"
+                    "Cancel = abort the action")
+                if ans is None:
+                    return None
+                if ans:
+                    reuse_threat = 1
+                else:
+                    self.log(f"WARNING: {ship.name} re-uses {sysname} without spending Threat "
+                             "(GM override).", "alert")
+        if adef["requires_power"] and not ship.reserve_power and not self.ask_yes_no(
+                "No Reserve Power", f"{name} requires Reserve Power and {ship.name} has none."
+                                    "\n\nProceed anyway?"):
+            return None
+        if name == "Warp" and not ship.warp_prepared and not self.ask_yes_no(
+                "Not prepared", f"{ship.name} has not used Prepare (Warp).\n\nProceed anyway?"):
+            return None
+        if name == "Fire":
+            if not ship.weapons_armed and not self.ask_yes_no(
+                    "Weapons not armed", f"{ship.name}'s weapons are not armed.\n\nFire anyway?"):
+                return None
+            if RANGES.index(band) > RANGES.index(weapon.range) and not self.ask_yes_no(
+                    "Out of range", f"Target is at {band} range but {weapon.name} reaches "
+                                    f"{weapon.range}.\n\nFire anyway?"):
+                return None
+        if name in ("Ram", "Tractor Beam") and range_penalty(band) > 0 and not self.ask_yes_no(
+                "Out of range", f"{name} requires the target within Close range (currently "
+                                f"{band}).\n\nProceed anyway?"):
+            return None
+        if name in ("Targeting Solution", "Reveal", "Launch Probe") and band == "Extreme" and \
+                not self.ask_yes_no("Out of range", f"{name} works within Long range.\n\n"
+                                                    "Proceed anyway?"):
+            return None
+        return reuse_threat
+
+    def _pay_action_costs(self, ship, name, adef, weapon, reuse_threat) -> bool:
+        spend, add_threat, items = 0, 0, []
+        if name == "Direct":
+            spend += 1
+            items.append("Direct")
+        if name == "Fire" and weapon is not None and weapon.wtype == "Torpedo":
+            n = 3 if self.salvo_var.get() else 1
+            if ship.side == "Player":
+                add_threat += n
+            else:
+                spend += n
+            items.append("torpedo salvo" if self.salvo_var.get() else "torpedo")
+        if adef["roll"] and self.autopay_var.get():
+            dice = clamp(int_var_value(self.dice_var, 2), 1, MAX_DICE_POOL)
+            cost = bonus_dice_cost(dice)
+            if cost:
+                spend += cost
+                items.append(f"{dice - 2} bonus d20")
+        if reuse_threat:
+            items.append("system re-use")
+        if ship.side == "NPC":
+            return self.pay_for_side(ship, spend + reuse_threat, " + ".join(items)) \
+                if spend + reuse_threat else True
+        if spend and not self.pay_for_side(ship, spend, " + ".join(items)):
+            return False
+        if add_threat:
+            self.add_threat(add_threat, f"{ship.name} fires "
+                                        f"{'a torpedo salvo' if add_threat > 1 else 'a torpedo'}")
+        return True
+
+    def _roll_defense(self, target, mode):
+        attr_name, dept_name, assist = (("Daring", "Conn", ("Structure", "Conn"))
+                                        if mode == "evasive"
+                                        else ("Daring", "Security", ("Weapons", "Security")))
+        a, d = target.crew_ratings()
+        dice = [make_die(a + d, d, "crew", self.rng) for _ in range(2)]
+        s_sys, s_dept = assist
+        dice.append(make_die(target.systems[s_sys] + target.departments[s_dept],
+                             target.departments[s_dept], "ship", self.rng))
+        out = evaluate_task(dice, 0)
+        desc = (f"Opposed: {target.name} defends with {attr_name} + {dept_name} "
+                f"[{format_dice(dice)}] -> {out.successes} success(es).")
+        return out, desc
+
+    def _perform_task(self, ship, name, adef, target, difficulty):
+        attr_v = int_var_value(self.crew_attr_var, 10)
+        dept_v = int_var_value(self.crew_dept_var, 3)
+        crit = max(1, dept_v) if self.focus_var.get() else 1
+        n = clamp(int_var_value(self.dice_var, 2), 1, MAX_DICE_POOL)
+        manual = self.mode_var.get() == "manual"
+        opposition = None
+        defense = self._defense_mode(target) if (adef["attack"] and target is not None) else None
+        if defense:
+            if manual:
+                opposition = int_var_value(self.opp_var, 0)
+                self.log(f"Opposed: {target.name} scored {opposition} success(es) (entered).")
+            else:
+                opp_out, desc = self._roll_defense(target, defense)
+                opposition = opp_out.successes
+                self.opp_var.set(opposition)
+                self.log(desc)
+        notes = []
+        if manual:
+            total = int_var_value(self.manual_succ_var, 0)
+            outcome = outcome_from_successes(total, difficulty, opposition)
+            dice_text = f"{total} success(es) entered manually"
+            if adef["sensor"] and ship.calibrated_sensors:
+                notes.append("Calibrated Sensors: apply the re-roll / ignore-trait benefit")
+        else:
+            dice = [make_die(attr_v + dept_v, crit, "crew", self.rng) for _ in range(n)]
+            if name == "Fire" and ship.targeting_solution and self.tsol_mode_var.get() == "reroll":
+                rr = reroll_worst(dice, self.rng)
+                if rr:
+                    notes.append(f"Targeting Solution re-roll {rr[0]} -> {rr[1]}")
+            if adef["sensor"] and ship.calibrated_sensors:
+                rr = reroll_worst(dice, self.rng)
+                if rr:
+                    notes.append(f"Calibrated Sensors re-roll {rr[0]} -> {rr[1]}")
+            if self.assist_var.get() and adef["assist"]:
+                s_sys, s_dept = adef["assist"]
+                dice.append(make_die(ship.systems.get(s_sys, 0) + ship.departments.get(s_dept, 0),
+                                     ship.departments.get(s_dept, 0), "ship", self.rng))
+            if adef["attack"] and ship.attack_pattern:
+                ca, cd = ship.crew_ratings()
+                dice.append(make_die(ca + cd, cd, "assist", self.rng))
+                notes.append("Attack Pattern helm assist")
+            outcome = evaluate_task(dice, difficulty, opposition)
+            dice_text = format_dice(dice)
+            if outcome.assist_ignored:
+                notes.append("assist dice ignored - the crew scored no successes")
+        if adef["sensor"] and ship.calibrated_sensors:
+            ship.calibrated_sensors = False
+        if ship.rerouted_power and ship.rerouted_power == adef["system"]:
+            notes.append(f"Rerouted Reserve Power ({ship.rerouted_power}) used")
+            ship.rerouted_power = ""
+
+        verdict = "SUCCESS" if outcome.success else "FAILURE"
+        vs = f"Difficulty {difficulty}"
+        if opposition is not None:
+            vs += f", must beat defender's {opposition}"
+        gain = "Momentum" if ship.side == "Player" else "Threat"
+        summary = (f"{verdict}: {outcome.successes} success(es) vs {vs}"
+                   + (f"  ->  +{outcome.excess} {gain}" if outcome.excess else ""))
+        detail = f"[{dice_text}]" + (f"  ({'; '.join(notes)})" if notes else "")
+        if outcome.complications:
+            summary += f"\n{outcome.complications} COMPLICATION(S) rolled!"
+        self.result_lbl.configure(text=f"{summary}\n{detail}",
+                                  style="Good.TLabel" if outcome.success else "Alert.TLabel")
+        self.log(f"{ship.name}: {name} - {summary.splitlines()[0]} {detail}",
+                 "success" if outcome.success else "fail")
+        if outcome.excess:
+            self.gain_for_side(ship, outcome.excess, f"{name} excess successes")
+        if outcome.complications:
+            self.log(f"{ship.name}: {outcome.complications} complication(s) on {name}! "
+                     "(GM: add a complication or let the players buy it off.)", "alert")
+        return outcome
+
+    def _consume_turn(self, ship, system):
+        ship.turns_used += 1
+        if system not in ship.systems_used:
+            ship.systems_used.append(system)
+        if ship.brace_for_impact:
+            ship.brace_for_impact = False
+            self.log(f"{ship.name}: Brace for Impact cleared (turn taken).")
+        msg = f"{ship.name} turn {ship.turns_used}/{ship.scale} used ({system})."
+        self.log(msg, "alert" if ship.turns_used > ship.scale else "info")
+
+    def _apply_effect(self, ship, name, adef, target, weapon, outcome):
+        ok = outcome.success if outcome is not None else True
+        if name in ("Fire", "Ram"):
+            self._resolve_attack(ship, name, target, weapon, ok)
+            return
+        if not ok:
+            self.log(f"{ship.name}: {name} failed - no effect.", "fail")
+            return
+        if name == "Direct":
+            self.log(f"{ship.name} directs an ally: they take an immediate Major Action without "
+                     "the +1 Difficulty penalty (assisted with Control + Command).", "success")
+        elif name == "Assist":
+            self.log(f"{ship.name}'s commander assists up to two allies' next tasks.", "success")
+        elif name == "Rally":
+            self.log(f"{ship.name} rallies the crew.", "success")
+        elif name in ("Impulse", "Thrusters", "Launch Probe", "Maneuver", "Sensor Sweep",
+                      "Reveal", "Transport"):
+            self.log(f"{ship.name}: {name} - {adef['reminder']}", "success")
+        elif name == "Attack Pattern":
+            ship.attack_pattern = True
+            self.log(f"{ship.name}: Attack Pattern - helm assists all attacks this round.",
+                     "success")
+        elif name == "Evasive Action":
+            ship.evasive = True
+            self.log(f"{ship.name}: Evasive Action - attacks against it are Opposed; its own "
+                     "attacks +1 Difficulty until End Round.", "success")
+        elif name == "Warp":
+            ship.warp_prepared = False
+            self.log(f"{ship.name} goes to warp: move up to {ship.systems['Engines']} zones "
+                     "(Engines).", "success")
+        elif name == "Prepare":
+            self._prepare(ship)
+        elif name == "Calibrate Weapons":
+            ship.calibrated_weapons = True
+            self.log(f"{ship.name}: weapons calibrated (+1 Damage on next attack).", "success")
+        elif name == "Targeting Solution":
+            ship.targeting_solution = True
+            tname = f" on {target.name}" if target and target is not ship else ""
+            self.log(f"{ship.name}: targeting solution locked{tname}.", "success")
+        elif name == "Defensive Fire":
+            ship.defensive_fire = True
+            self.log(f"{ship.name}: Defensive Fire - incoming attacks become Opposed (Daring + "
+                     "Security) until End Round.", "success")
+        elif name == "Modulate Shields":
+            ship.resistance_bonus = 2
+            self.log(f"{ship.name}: shields modulated - Resistance {ship.effective_resistance} "
+                     "until End Round.", "success")
+        elif name == "Tractor Beam":
+            target.tractored_by = ship.name
+            target.tractor_strength = max(0, ship.scale - 1)
+            self.log(f"{ship.name} locks a tractor beam on {target.name} (Strength "
+                     f"{target.tractor_strength}). Target is immobilised.", "success")
+        elif name == "Calibrate Sensors":
+            ship.calibrated_sensors = True
+            self.log(f"{ship.name}: sensors calibrated for the next sensor task.", "success")
+        elif name == "Scan for Weakness":
+            target.weakness_scanned = self.scan_mode_var.get()
+            benefit = "+2 Damage" if target.weakness_scanned == "damage" else "Piercing"
+            self.log(f"{ship.name} finds a weakness in {target.name}: next attack against it "
+                     f"gains {benefit}.", "success")
+        elif name == "Damage Control":
+            self._damage_control(ship)
+        elif name == "Regenerate Shields":
+            amount = max(0, int_var_value(self.crew_dept_var, 0))
+            if self.regen_boost_var.get() and self.pay_for_side(ship, 1, "Regenerate +2"):
+                amount += 2
+            before = ship.shields
+            ship.shields = min(ship.shields_max, ship.shields + amount)
+            self.log(f"{ship.name} regenerates shields: {before} -> {ship.shields}/"
+                     f"{ship.shields_max} (+{amount}).", "success")
+        elif name == "Regain Power":
+            ship.reserve_power = True
+            ship.regain_power_penalty = 0
+            self.log(f"{ship.name} regains Reserve Power.", "success")
+        elif name == "Reroute Power":
+            sysname = self.ask_choice("Reroute Power", f"Reroute {ship.name}'s Reserve Power to "
+                                                       "which system?", SYSTEMS, "Weapons")
+            if sysname:
+                ship.rerouted_power = sysname
+                self.log(f"{ship.name} reroutes Reserve Power to {sysname}.", "success")
+
+    def _prepare(self, ship):
+        opts = [f"Shields: {'Lower' if ship.shields_up else 'Raise'}",
+                f"Weapons: {'Disarm' if ship.weapons_armed else 'Arm'}",
+                "Prepare for Warp"]
+        choice = self.ask_choice("Prepare", f"What does {ship.name} prepare?", opts, opts[1])
+        if choice is None:
+            self.log(f"{ship.name}: Prepare cancelled.")
+            return
+        if choice.startswith("Shields"):
+            ship.shields_up = not ship.shields_up
+            self.log(f"{ship.name} {'raises' if ship.shields_up else 'lowers'} shields.",
+                     "success")
+        elif choice.startswith("Weapons"):
+            ship.weapons_armed = not ship.weapons_armed
+            self.log(f"{ship.name} {'arms' if ship.weapons_armed else 'disarms'} weapons.",
+                     "success")
+        else:
+            ship.warp_prepared = True
+            self.log(f"{ship.name} prepares for warp.", "success")
+
+    def _damage_control(self, ship):
+        damaged = [s for s in SYSTEMS if ship.breaches.get(s, 0) > 0]
+        if damaged:
+            sysname = damaged[0] if len(damaged) == 1 else self.ask_choice(
+                "Damage Control", f"Patch a breach on which {ship.name} system?",
+                damaged, damaged[0])
+            if sysname:
+                ship.breaches[sysname] -= 1
+                if ship.breaches[sysname] == 0 and sysname in ship.devastating_systems:
+                    ship.devastating_systems.remove(sysname)
+                self.log(f"{ship.name}: Damage Control patches 1 breach on {sysname} "
+                         f"({ship.breaches[sysname]} left).", "success")
+        else:
+            self.log(f"{ship.name}: Damage Control - no breaches to patch.")
+        if ship.persistent_effects:
+            eff = ship.persistent_effects.pop(0)
+            self.log(f"{ship.name}: Damage Control also extinguishes Persistent damage from "
+                     f"{eff['source']}.", "success")
+
+    def _resolve_attack(self, ship, name, target, weapon, hit):
+        calib = 1 if name == "Fire" and ship.calibrated_weapons else 0
+        scan = target.weakness_scanned
+        choose = name == "Fire" and ship.targeting_solution and self.tsol_mode_var.get() == "choose"
+        if name == "Fire":
+            ship.calibrated_weapons = False
+            ship.targeting_solution = False
+        target.weakness_scanned = ""
+        label = weapon.name if name == "Fire" else "Collision (Ram)"
+        if not hit:
+            self.log(f"MISS - {ship.name}'s {label} fails to hit {target.name}.", "fail")
+            self.result_lbl.configure(text=self.result_lbl.cget("text") + "\nAttack MISSES.")
+            return
+        if name == "Fire":
+            base = weapon.damage
+            piercing = weapon.has("Piercing") or scan == "piercing"
+            if weapon.has("Versatile"):
+                x = weapon.qval("Versatile", 1)
+                self.gain_for_side(ship, x, f"Versatile {x}")
+        else:
+            base = ship.scale
+            piercing = scan == "piercing"
+        self.pending_attack = {
+            "attacker": ship.name, "target": target.name, "label": label,
+            "weapon": copy.deepcopy(weapon) if name == "Fire" else None,
+            "calibrate": calib, "scan_damage": 2 if scan == "damage" else 0,
+            "choose_system": choose, "ram": name == "Ram",
+        }
+        self.dmg_weapon_var.set(label)
+        self.dmg_base_var.set(base)
+        self.dmg_bonus_var.set(0)
+        self.pierce_var.set(piercing)
+        self.devastate_var.set(False)
+        self.log(f"HIT - {ship.name}'s {label} strikes {target.name}! Base damage {base}"
+                 + (f" +{calib} calibrated" if calib else "")
+                 + (" +2 weakness" if scan == "damage" else "")
+                 + (" (Piercing)" if piercing else "")
+                 + ". Resolve it with APPLY DAMAGE.", "success")
+        self.result_lbl.configure(text=self.result_lbl.cget("text")
+                                  + "\nAttack HITS - resolve damage in the Tactical panel.")
+
+    # ========================================================= damage logic
+    def on_damage_weapon_change(self):
+        if self.pending_attack:
+            if self.dmg_weapon_var.get() == self.pending_attack["label"]:
+                return
+            self.pending_attack = None
+            self.log("Pending attack cleared (damage weapon changed manually).")
+        ship = self.attacker
+        weapon = ship.weapon(self.dmg_weapon_var.get()) if ship else None
+        if weapon:
+            self.dmg_base_var.set(weapon.damage)
+            self.pierce_var.set(weapon.has("Piercing"))
+        self.refresh_all()
+
+    def clear_pending_attack(self):
+        if self.pending_attack:
+            self.log("Pending attack discarded.")
+        self.pending_attack = None
+        self.dmg_bonus_var.set(0)
+        self.devastate_var.set(False)
+        self.refresh_all()
+
+    def apply_damage(self):
+        pa = self.pending_attack
+        target = self.target
+        if pa:
+            ptarget = self.ship_by_name(pa["target"])
+            if ptarget is None:
+                pa = self.pending_attack = None
+            elif ptarget is not target:
+                ans = self.ask_yes_no_cancel(
+                    "Pending attack",
+                    f"The pending hit was against {ptarget.name}, but "
+                    f"{target.name if target else 'no ship'} is selected as Target.\n\n"
+                    f"Yes = apply it to {ptarget.name}\nNo = discard the pending hit and apply "
+                    "manual damage to the selected target\nCancel = abort")
+                if ans is None:
+                    return
+                if ans:
+                    target = ptarget
+                else:
+                    pa = self.pending_attack = None
+        if target is None:
+            self.show_error("No target", "Select a target ship first.")
+            return
+        attacker = self.ship_by_name(pa["attacker"]) if pa else self.attacker
+        weapon = pa["weapon"] if pa else self._damage_weapon()
+        if not pa and attacker is target:
+            attacker = None   # e.g. GM applying hazard damage to the acting ship
+        bonus = int_var_value(self.dmg_bonus_var, 0)
+        dev = self.devastate_var.get()
+        cost = bonus * bonus_damage_cost_each(weapon) + (devastating_attack_cost(weapon) if dev
+                                                         else 0)
+        if cost:
+            if attacker is None:
+                self.log(f"Bonus damage / Devastating Attack ({cost} Momentum) - no attacker "
+                         "selected, cost not deducted.", "alert")
+            elif not self.pay_for_side(attacker, cost, "bonus damage / Devastating Attack"):
+                return
+        raw = (int_var_value(self.dmg_base_var, 0) + (pa["calibrate"] if pa else 0)
+               + (pa["scan_damage"] if pa else 0) + bonus)
+        label = pa["label"] if pa else (weapon.name if weapon else "Damage")
+        source = f"{attacker.name}'s {label}" if attacker else label
+        self._inflict_damage(target, raw, self.pierce_var.get(), source, weapon=weapon,
+                             choose_system=bool(pa and pa["choose_system"]),
+                             devastating_attack=dev)
+        if pa and pa["ram"] and attacker is not None and attacker is not target:
+            recoil = target.scale
+            if self.ask_yes_no("Collision recoil",
+                               f"Ramming also damages {attacker.name}.\n\nApply suggested "
+                               f"collision damage {recoil} (= {target.name}'s Scale) to "
+                               f"{attacker.name}?"):
+                self._inflict_damage(attacker, recoil, False,
+                                     f"Collision recoil from ramming {target.name}")
+        self.pending_attack = None
+        self.dmg_bonus_var.set(0)
+        self.devastate_var.set(False)
+        self.changed()
+
+    def _inflict_damage(self, target, raw, piercing, source, weapon=None, choose_system=False,
+                        devastating_attack=False):
+        out = resolve_shield_damage(target.shields, target.shields_max, raw,
+                                    target.effective_resistance, piercing)
+        res_txt = "Piercing" if piercing else f"Resistance {out.resistance_applied}"
+        target.shields = out.shields_after
+        self.log(f"{source} -> {target.name}: {raw} - {res_txt} = {out.final_damage} damage. "
+                 f"Shields {out.shields_before} -> {out.shields_after}/{target.shields_max}.",
+                 "alert" if out.final_damage else "info")
+        if weapon is not None:
+            self._apply_on_hit_qualities(weapon, target)
+        if out.final_damage <= 0:
+            self.log(f"{target.name}'s Resistance absorbs the hit - no Shaken or Breach.")
+            return out
+        for reason in out.shaken_reasons:
+            target.shaken = True
+            self.log(f"{target.name} is SHAKEN ({reason})!", "alert")
+            self.refresh_all()
+            self.open_shaken_resolver(target, reason)
+        high_yield = weapon is not None and weapon.has("High Yield")
+        devastating = weapon is not None and weapon.has("Devastating")
+        for reason in out.breach_reasons:
+            sysname = self._pick_breach_system(target, choose_system, reason)
+            self._add_breach(target, sysname, 1 + (1 if high_yield else 0), reason, devastating)
+        if devastating_attack:
+            sysname = self._pick_breach_system(target, False, "Devastating Attack")
+            self._add_breach(target, sysname, 1, "Devastating Attack", devastating)
+        if target.total_breaches() >= target.scale:
+            self.log(f"WARNING: {target.name} has {target.total_breaches()} breaches (Scale "
+                     f"{target.scale}) - check disabled systems / destruction.", "alert")
+        return out
+
+    def _apply_on_hit_qualities(self, weapon, target):
+        if weapon.has("Dampening") and target.reserve_power:
+            target.reserve_power = False
+            self.log(f"Dampening: {target.name}'s Reserve Power is drained.", "alert")
+        if weapon.has("Jamming"):
+            target.jammed = True
+            self.log(f"Jamming: {target.name} suffers +1 Difficulty to Comms/Sensors tasks "
+                     "until End Round.", "alert")
+        if weapon.has("Slowing"):
+            target.slowed = True
+            self.log(f"Slowing: {target.name} cannot Keep the Initiative until End Round.",
+                     "alert")
+        if weapon.has("Persistent"):
+            x = weapon.qval("Persistent", 1)
+            target.persistent_effects.append({"amount": x, "source": weapon.name})
+            self.log(f"Persistent {x}: {target.name} will take {x} damage at each End Round "
+                     "until fixed with Damage Control.", "alert")
+        if weapon.has("Area"):
+            self.log("Area: other vessels near the target may also be affected - GM adjudicates.")
+        if weapon.has("Hidden"):
+            self.log(f"Hidden {weapon.qval('Hidden', 1)}: locating the attacker is +"
+                     f"{weapon.qval('Hidden', 1)} Difficulty.")
+        if weapon.has("Calibration"):
+            self.log("Calibration: remember any calibration benefits for this weapon.")
+
+    def _pick_breach_system(self, target, choose, reason):
+        if choose:
+            sysname = self.ask_choice("Targeting Solution - choose system",
+                                      f"Choose the system hit on {target.name} ({reason}):",
+                                      SYSTEMS, "Weapons")
+            if sysname:
+                self.log(f"Targeting Solution: system hit chosen -> {sysname}.")
+                self.last_system_hit = sysname
+                return sysname
+        roll, sysname = roll_system_hit(self.rng)
+        self.last_system_hit = sysname
+        self.log(f"System Hit roll (d{SYSTEM_HIT_DIE}): {roll} -> {sysname}.")
+        return sysname
+
+    def _add_breach(self, target, sysname, count, reason, devastating=False):
+        target.breaches[sysname] = target.breaches.get(sysname, 0) + count
+        if devastating and sysname not in target.devastating_systems:
+            target.devastating_systems.append(sysname)
+        self.log(f"BREACH x{count} on {target.name} {sysname} ({reason})"
+                 + (" [High Yield]" if count > 1 else "") + (" [Devastating]" if devastating else "")
+                 + f". {sysname} breaches: {target.breaches[sysname]}.", "alert")
+
+    def open_shaken_resolver(self, ship, reason):
+        result = self.ask_shaken_result(ship, reason)
+        if not result:
+            self.log(f"Shaken result for {ship.name} skipped by GM.")
+            return
+        name, rolls = result
+        rolled = (" (rolled " + " -> ".join(str(r) for r in rolls) + ")") if rolls else \
+            " (chosen manually)"
+        self.apply_minor_damage(ship, name, rolled)
+
+    def apply_minor_damage(self, ship, name, how=""):
+        if name == "Brace for Impact!":
+            ship.brace_for_impact = True
+        elif name == "Losing Power!":
+            ship.reserve_power = False
+            ship.regain_power_penalty = 1
+        elif name == "Casualties and Minor Damage":
+            text = self.ask_string("Complication", f"Complication trait for {ship.name}:",
+                                   "Casualties and Minor Damage")
+            ship.complications.append(text.strip() if text and text.strip()
+                                      else "Casualties and Minor Damage")
+        self.log(f"Minor Damage on {ship.name}{how}: {name} - "
+                 f"{minor_damage_description(name)}", "alert")
+        self.changed()
+
+    def shaken_resolver_clicked(self):
+        t = self.target
+        if t is None:
+            self.show_error("No target", "Select a target ship first.")
+            return
+        t.shaken = True
+        self.open_shaken_resolver(t, "opened manually by the GM")
+
+    def roll_system_hit_clicked(self):
+        roll, sysname = roll_system_hit(self.rng)
+        self.last_system_hit = sysname
+        self.log(f"System Hit Generator (d{SYSTEM_HIT_DIE}): {roll} -> {sysname}.")
+        self.refresh_all()
+
+    def breach_last_hit(self):
+        t = self.target
+        if t is None or not self.last_system_hit:
+            self.show_error("System hit", "Select a target and roll a system hit first.")
+            return
+        self._add_breach(t, self.last_system_hit, 1, "System Hit Generator")
+        self.changed()
+
+    def adjust_breach(self, sysname, delta):
+        t = self.target
+        if t is None:
+            return
+        new = max(0, t.breaches.get(sysname, 0) + delta)
+        if new == t.breaches.get(sysname, 0):
+            return
+        t.breaches[sysname] = new
+        if new == 0 and sysname in t.devastating_systems:
+            t.devastating_systems.remove(sysname)
+        self.log(f"GM {'adds' if delta > 0 else 'removes'} a breach: {t.name} {sysname} -> {new}.",
+                 "alert" if delta > 0 else "info")
+        self.changed()
+
+    def toggle_target_flag(self, attr, var):
+        t = self.target
+        if t is None:
+            return
+        setattr(t, attr, bool(var.get()))
+        self.log(f"{t.name}: {attr.replace('_', ' ')} -> {'Yes' if var.get() else 'No'}.")
+        self.changed()
+
+    def adjust_target_shields(self, delta):
+        t = self.target
+        if t is None:
+            return
+        t.shields = clamp(t.shields + delta, 0, t.shields_max)
+        self.log(f"GM adjusts {t.name} Shields {delta:+d} -> {t.shields}/{t.shields_max}.")
+        self.changed()
+
+    def set_target_shields(self):
+        t = self.target
+        if t is None:
+            return
+        t.shields = clamp(int_var_value(self.tgt_set_shields_var, t.shields), 0, t.shields_max)
+        self.log(f"GM sets {t.name} Shields to {t.shields}/{t.shields_max}.")
+        self.changed()
+
+    def restore_target_shields(self):
+        t = self.target
+        if t is None:
+            return
+        t.shields = t.shields_max
+        self.log(f"{t.name} Shields restored to {t.shields_max}.")
+        self.changed()
+
+    def add_complication(self):
+        t = self.target
+        if t is None:
+            return
+        text = self.ask_string("Complication", f"New complication for {t.name}:")
+        if text and text.strip():
+            t.complications.append(text.strip())
+            self.log(f"{t.name} gains complication: {text.strip()}.", "alert")
+            self.changed()
+
+    def remove_complication(self):
+        t = self.target
+        sel = self.comp_lb.curselection()
+        if t is None or not sel or sel[0] >= len(t.complications):
+            return
+        removed = t.complications.pop(sel[0])
+        self.log(f"{t.name}: complication removed ({removed}).")
+        self.changed()
+
+    def clear_target_effects(self):
+        t = self.target
+        if t is None:
+            return
+        t.clear_temporary_effects()
+        self.log(f"{t.name}: all temporary effects cleared by the GM.")
+        self.changed()
+
+    # ========================================================= roster editing
+    def new_ship(self):
+        ship = ShipEditor.ask(self.root, None, [s.name for s in self.ships], "Custom Ship Creator")
+        if ship:
+            self.ships.append(ship)
+            self.log(f"Custom ship added: {ship.name} (Scale {ship.scale}, {ship.crew_quality} "
+                     "crew).")
+            self.changed()
+
+    def edit_ship(self):
+        ship = self.selected_roster_ship() or self.attacker
+        if ship is None:
+            return
+        old = ship.name
+        edited = ShipEditor.ask(self.root, ship, [s.name for s in self.ships],
+                                f"Edit Ship - {ship.name}")
+        if not edited:
+            return
+        self.ships[self.ships.index(ship)] = edited
+        if old != edited.name:
+            for var in (self.attacker_var, self.target_var):
+                if var.get() == old:
+                    var.set(edited.name)
+            if self.pending_attack:
+                for key in ("attacker", "target"):
+                    if self.pending_attack[key] == old:
+                        self.pending_attack[key] = edited.name
+            if self._last_attacker == old:
+                self._last_attacker = edited.name
+        self.log(f"Ship updated: {edited.name}.")
+        self.changed()
+
+    def duplicate_ship(self):
+        ship = self.selected_roster_ship() or self.attacker
+        if ship is None:
+            return
+        dup = copy.deepcopy(ship)
+        dup.name = self.unique_name(ship.name)
+        self.ships.append(dup)
+        self.log(f"Duplicated {ship.name} as {dup.name}.")
+        self.changed()
+
+    def delete_ship(self):
+        ship = self.selected_roster_ship()
+        if ship is None:
+            self.show_info("Delete", "Select a ship in the roster list first.")
+            return
+        if not self.ask_yes_no("Delete ship", f"Remove {ship.name} from the roster?"):
+            return
+        self.ships.remove(ship)
+        if self.pending_attack and ship.name in (self.pending_attack["attacker"],
+                                                 self.pending_attack["target"]):
+            self.pending_attack = None
+        self.log(f"{ship.name} removed from the roster.")
+        self.changed()
+
+    def full_repair_selected(self):
+        ship = self.selected_roster_ship() or self.target
+        if ship is None:
+            return
+        if self.ask_yes_no("Full Repair", f"Fully repair {ship.name}? (Shields, breaches, "
+                                          "complications and all effects reset.)"):
+            ship.full_repair()
+            self.log(f"{ship.name} fully repaired.")
+            self.changed()
+
+    def generate_npc(self):
+        quality = self.gen_quality_var.get()
+        profile = self.gen_profile_var.get()
+        scale = clamp(int_var_value(self.gen_scale_var, 4), 1, 7)
+        name = self.gen_name_var.get().strip() or f"NPC {profile.split(' ')[0]} S{scale}"
+        ship = generate_npc_ship(self.unique_name(name), scale, quality, profile, self.rng)
+        self.ships.append(ship)
+        if self.attacker is not None and self.attacker.side == "Player":
+            self.target_var.set(ship.name)
+        self.gen_name_var.set("")
+        self.log(f"Generated NPC: {ship.name} - Scale {scale}, {quality} crew, Shields "
+                 f"{ship.shields_max}, Resistance {ship.resistance}.")
+        self.changed()
+
+    # ============================================================ persistence
+    def roster_to_dict(self):
+        return {
+            "app": APP_NAME, "format_version": SAVE_FORMAT_VERSION,
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "round": self.round, "threat": self.threat, "momentum": self.momentum,
+            "gm_modifier": int_var_value(self.gm_mod_var, 0),
+            "attacker": self.attacker_var.get(), "target": self.target_var.get(),
+            "ships": [s.to_dict() for s in self.ships],
+        }
+
+    def save_roster(self, path=None) -> bool:
+        path = path or self.data_file
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.roster_to_dict(), fh, indent=2)
+            os.replace(tmp, path)
+        except OSError as exc:
+            self.show_error("Save failed", f"Could not save roster to\n{path}\n\n{exc}\n\n"
+                                           "Try File > Save Roster As... to pick another folder.")
+            return False
+        if os.path.abspath(path) == os.path.abspath(self.data_file):
+            self.dirty = False
+        self.log(f"Roster saved ({len(self.ships)} ships) to {path}.")
+        self.refresh_all()
+        return True
+
+    def load_roster(self, path=None, quiet=False) -> bool:
+        path = path or self.data_file
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            ships, meta, errors = parse_roster_data(data)
+        except (OSError, ValueError) as exc:
+            if not quiet:
+                self.show_error("Load failed", f"Could not load roster from\n{path}\n\n{exc}")
+            else:
+                self.log(f"Could not load {path}: {exc}", "alert")
+            return False
+        if not ships:
+            if not quiet:
+                self.show_error("Load failed", f"No valid ships found in\n{path}")
+            return False
+        self.ships = []
+        for ship in ships:            # guarantee unique names
+            ship.name = self.unique_name(ship.name)
+            self.ships.append(ship)
+        self.round = max(1, to_int(meta.get("round", 1), 1))
+        self.threat = max(0, to_int(meta.get("threat", 0), 0))
+        self.momentum = clamp(to_int(meta.get("momentum", 0), 0), 0, MOMENTUM_MAX)
+        self.gm_mod_var.set(clamp(to_int(meta.get("gm_modifier", 0), 0), -3, 5))
+        self.attacker_var.set(str(meta.get("attacker", "")))
+        self.target_var.set(str(meta.get("target", "")))
+        self.pending_attack = None
+        self._last_attacker = None
+        self.dirty = os.path.abspath(path) != os.path.abspath(self.data_file)
+        self.log(f"Roster loaded from {path}: {len(self.ships)} ships, round {self.round}.")
+        for err in errors:
+            self.log(f"Skipped invalid ship ({err}).", "alert")
+        self.refresh_all()
+        return True
+
+    def _startup_load(self, autoload):
+        self.log(f"{APP_NAME} v{APP_VERSION} ready. Data file: {self.data_file}")
+        loaded = False
+        if autoload and os.path.exists(self.data_file):
+            loaded = self.load_roster(self.data_file, quiet=True)
+            if not loaded:
+                self.root.after(200, lambda: self.show_error(
+                    "Roster file problem",
+                    f"{self.data_file} could not be read, so the preset ships were loaded "
+                    "instead.\nThe file was NOT overwritten - fix or remove it, or save to "
+                    "replace it."))
+        if not loaded:
+            self._load_presets()
+        self.on_station_change()
+
+    def _load_presets(self):
+        self.ships = preset_ships()
+        self.round, self.threat, self.momentum = 1, 0, 0
+        self.attacker_var.set(self.ships[0].name)
+        self.target_var.set(self.ships[1].name)
+        self.pending_attack = None
+        self._last_attacker = None
+        self.dirty = False
+        self.log("Preset ships loaded: USS Aurora, D'Deridex Warbird.")
+        self.refresh_all()
+
+    def _confirm_discard(self) -> bool:
+        return not self.dirty or self.ask_yes_no(
+            "Unsaved changes", "The current roster has unsaved changes.\n\nDiscard them?")
+
+    def save_roster_clicked(self):
+        self.save_roster(self.data_file)
+
+    def load_roster_clicked(self):
+        if not os.path.exists(self.data_file):
+            self.show_info("Load Roster", f"No saved roster found yet:\n{self.data_file}\n\n"
+                                          "Use 'Save Roster to JSON' first.")
+            return
+        if self._confirm_discard():
+            self.load_roster(self.data_file)
+
+    def save_roster_as(self):
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Save Roster As", defaultextension=".json",
+            initialfile="sta2e_ships.json", filetypes=[("JSON files", "*.json")])
+        if path:
+            self.save_roster(path)
+
+    def load_roster_from(self):
+        if not self._confirm_discard():
+            return
+        path = filedialog.askopenfilename(parent=self.root, title="Load Roster",
+                                          filetypes=[("JSON files", "*.json"),
+                                                     ("All files", "*.*")])
+        if path:
+            self.load_roster(path)
+
+    def import_ships(self):
+        path = filedialog.askopenfilename(parent=self.root, title="Import Ship(s)",
+                                          filetypes=[("JSON files", "*.json"),
+                                                     ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                ships, _meta, errors = parse_roster_data(json.load(fh))
+        except (OSError, ValueError) as exc:
+            self.show_error("Import failed", f"Could not import from\n{path}\n\n{exc}")
+            return
+        for ship in ships:
+            ship.name = self.unique_name(ship.name)
+            self.ships.append(ship)
+        self.log(f"Imported {len(ships)} ship(s) from {path}: "
+                 + ", ".join(s.name for s in ships))
+        for err in errors:
+            self.log(f"Skipped invalid ship ({err}).", "alert")
+        self.changed()
+
+    def export_ship(self):
+        ship = self.selected_roster_ship() or self.attacker
+        if ship is None:
+            return
+        safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in ship.name).strip()
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title=f"Export {ship.name}", defaultextension=".json",
+            initialfile=f"{safe or 'ship'}.json", filetypes=[("JSON files", "*.json")])
+        if not path:
+            return
+        data = {"app": APP_NAME, "format_version": SAVE_FORMAT_VERSION,
+                "ships": [ship.to_dict()]}
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError as exc:
+            self.show_error("Export failed", str(exc))
+            return
+        self.log(f"Exported {ship.name} to {path}.")
+
+    def reset_to_presets(self):
+        if self.ask_yes_no("Reset Roster", "Replace the current roster with the preset ships?"
+                                           "\n(Your JSON file is not changed until you save.)"):
+            self._load_presets()
+            self.dirty = True
+            self.refresh_all()
+
+    def on_close(self):
+        if self.dirty:
+            ans = self.ask_yes_no_cancel("Save before exit?",
+                                         f"Save the roster to {self.data_file} before exiting?")
+            if ans is None:
+                return
+            if ans and not self.save_roster(self.data_file):
+                return
+        self.root.destroy()
+
+    # ================================================================== help
+    def show_reference(self):
+        win = tk.Toplevel(self.root)
+        win.title("STA 2e Quick Reference")
+        win.geometry("760x640")
+        txt = ScrolledText(win, wrap="word", padx=8, pady=8)
+        txt.pack(fill="both", expand=True)
+        txt.tag_configure("h", font=self.font_big, foreground="#5b2c83")
+        txt.insert("end", "Crew Quality (NPC rolls)\n", "h")
+        for q, (a, d) in CREW_QUALITY.items():
+            txt.insert("end", f"  {q:<12} Attribute {a}, Department {d}\n")
+        txt.insert("end", "\nShaken / Minor Damage (d20)\n", "h")
+        for lo, hi, name, desc in MINOR_DAMAGE_TABLE:
+            txt.insert("end", f"  {lo}-{hi}: {name} - {desc}\n")
+        txt.insert("end", "  Shields < 50% or < 25% -> Shaken. Dropping below 25% after "
+                          "already being Shaken by the same attack -> Breach instead.\n")
+        txt.insert("end", f"\nSystem Hit Table (d{SYSTEM_HIT_DIE})\n", "h")
+        for lo, hi, s in SYSTEM_HIT_TABLE:
+            txt.insert("end", f"  {lo}-{hi}: {s}\n")
+        txt.insert("end", "\nBreach triggers\n", "h")
+        txt.insert("end", "  Shields reduced to 0; any damaging hit while Shields are 0; "
+                          "< 25% when already Shaken in the same attack. High Yield adds +1.\n")
+        txt.insert("end", "\nWeapon Qualities\n", "h")
+        for q, (has_x, desc) in WEAPON_QUALITIES.items():
+            txt.insert("end", f"  {q}{' X' if has_x else ''}: {desc}\n")
+        txt.insert("end", "\nBridge Stations & Actions\n", "h")
+        for station, actions in BRIDGE_STATIONS.items():
+            txt.insert("end", f"  {station}\n")
+            for name, a in actions.items():
+                task = f"{a['attr']} + {a['dept']}, " if a["attr"] and a["roll"] else ""
+                diff = f"Diff {a['base']}" if a["roll"] else "no roll"
+                txt.insert("end", f"    - {name} ({a['kind']}; {task}{diff}): {a['reminder']}\n")
+        txt.insert("end", "\nDifficulty\n", "h")
+        txt.insert("end", "  Total = Base + Weapon modifiers (Cumbersome +1) + context "
+                          "(range, Evasive, Jammed, ...) + GM Modifier (-3..+5).\n"
+                          "  Bonus d20s: 3rd costs 1, 4th 2, 5th 3 Momentum (NPC: Threat).\n"
+                          "  Opposed tasks: the attacker must reach the Difficulty AND beat the "
+                          "defender's successes (ties favour the defender).\n")
+        txt.configure(state="disabled")
+
+    def show_about(self):
+        self.show_info("About", f"{APP_NAME} v{APP_VERSION}\n\nGM helper for Star Trek "
+                                "Adventures 2nd Edition starship combat.\n\nRoster file:\n"
+                                f"{self.data_file}\n\nUnofficial fan tool - Star Trek "
+                                "Adventures is published by Modiphius Entertainment.")
+
+
+def _enable_windows_dpi_awareness():
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+
+
+def main():
+    _enable_windows_dpi_awareness()
+    root = tk.Tk()
+    CombatHelperApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

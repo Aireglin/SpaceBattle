@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Local roster saved by the app (your campaign data)
+sta2e_ships.json
+sta2e_ships.json.tmp
