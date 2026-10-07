@@ -124,22 +124,29 @@ Rulebook weapon tables (pp. 228–230).
   rating from the editor (you can change them for a what-if) and shows the bonus:
   Weapons ≤6 +0, 7–8 +1, 9–10 +2, 11–12 +3, 13+ +4. The bonus is added to the Damage
   rating by default, because the app treats a weapon's Damage as its full rating. A
-  checkbox turns this off. The breakdown reads like
+  checkbox turns this off, and that choice is saved with the weapon. The breakdown
+  reads like
   `Scale 5 + 0 (Arrays) + 3 (Weapons 11 bonus) = Damage 8`.
 * **Everything stays editable:** name, damage, range and every quality. A status
   line shows whether the weapon still *matches the standard values* or is
   *customised*, and what differs (e.g. `Damage 10 (standard 8); qualities edited`).
   **Auto-Populate** re-applies the standard values at any time. With *Auto-fill when
-  a selection changes* ticked (the default), picking a type fills the fields
-  straight away. Changing Scale, Weapons or the bonus box only updates the damage.
-  Untick it to change the selectors without touching your fields.
-* When you edit an existing weapon, the selectors are pre-set from the weapon's
-  saved profile, or guessed from its name (*Photon Torpedoes* → Photon). Its values
-  are not changed until you ask.
-* The chosen Energy Type / Delivery Method / Torpedo Type is saved with the weapon in
-  the roster file. **Recalc Damage** in the ship editor updates the damage of all
-  linked weapons after a Scale or Weapons change, after you confirm. Range, name and
-  qualities stay as they are, and unlinked weapons are listed but left alone.
+  a selection changes* ticked (the default), picking a different type fills the
+  fields straight away; re-picking the same entry changes nothing. Changing Scale,
+  Weapons or the bonus box updates the damage only while it still equals the
+  standard, so a hand-set damage is kept. Untick auto-fill to change the selectors
+  without touching your fields.
+* **Linking:** a weapon is linked to the calculator once you pick a type in a
+  dropdown or click Auto-Populate. The chosen Energy Type / Delivery Method /
+  Torpedo Type and the bonus setting are then saved with the weapon in the roster
+  file. A new weapon starts as a custom (unlinked) weapon. When you edit an older
+  weapon, the dropdowns are pre-set from a guess based on its name (*Photon
+  Torpedoes* → Photon). The guess doesn't link the weapon or change any value.
+* **Recalc Damage** in the ship editor updates the damage of linked weapons after a
+  Scale or Weapons change, using each weapon's own bonus setting. When several
+  weapons would change, you can update all of them or confirm weapon by weapon, so a
+  hand-set damage can be kept. Range, name and qualities stay as they are. Unlinked
+  weapons are listed and left alone.
 * **Area or Spread** (Arrays): when the weapon hits, the app asks which of the two
   this attack uses. Spread makes the Devastating Attack cost 1. If you skip the
   question, it is asked again when damage is applied. The ship's weapon keeps *Area

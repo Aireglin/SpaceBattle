@@ -710,6 +710,11 @@ class WeaponCalculatorTests(unittest.TestCase):
         self.assertEqual((w.energy_type, w.delivery, w.torpedo_type), ("", "", "Quantum"))
         old = Weapon.from_dict({"name": "Old", "wtype": "Energy", "energy_type": None})
         self.assertEqual((old.energy_type, old.delivery, old.torpedo_type), ("", "", ""))
+        self.assertTrue(old.include_bonus)                     # older files: bonus counted
+        self.assertFalse(Weapon.from_dict({"name": "N", "include_bonus": "false"}).include_bonus)
+        nob = calculate_weapon("Energy", 5, 11, "Phaser", "Arrays", include_bonus=False)[0]
+        self.assertFalse(nob.include_bonus)
+        self.assertEqual(Weapon.from_dict(nob.to_dict()), nob)
         ship = preset_ships()[0]
         ship.weapons.append(calculate_weapon("Energy", 5, 11, "Phaser", "Cannon")[0])
         clone = Ship.from_dict(ship.to_dict())

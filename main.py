@@ -629,6 +629,7 @@ class Weapon:
     energy_type: str = ""
     delivery: str = ""
     torpedo_type: str = ""
+    include_bonus: bool = True       # Weapons System Damage Bonus counted in `damage`
 
     def has(self, quality: str) -> bool:
         return quality in self.qualities
@@ -674,6 +675,7 @@ class Weapon:
             energy_type=etype if energy and etype in ENERGY_TYPES else "",
             delivery=delivery if energy and delivery in ENERGY_DELIVERY_METHODS else "",
             torpedo_type=ttype if not energy and ttype in TORPEDO_TYPES else "",
+            include_bonus=to_bool(data.get("include_bonus", True), True),
         )
 
 
@@ -731,7 +733,8 @@ def calculate_weapon(wtype, scale, weapons_rating, energy_type="", delivery="", 
     if include_bonus:
         parts.append((f"Weapons {rating} bonus", weapons_damage_bonus(rating)))
     damage = sum(v for _label, v in parts)
-    return Weapon(name, wtype, damage, rng, quals, **profile), parts
+    return Weapon(name, wtype, damage, rng, quals, include_bonus=bool(include_bonus),
+                  **profile), parts
 
 
 def format_weapon_calc(parts) -> str:
@@ -1844,6 +1847,7 @@ class WeaponDialog(tk.Toplevel):
         self.resizable(False, False)
         self.result = None
         self._filling = False
+        self._std_damage = None          # standard damage for the last calculator inputs
         w = weapon or Weapon()
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -1863,7 +1867,7 @@ class WeaponDialog(tk.Toplevel):
         ttk.Label(frm, text="Range").grid(row=2, column=0, sticky="w")
         ttk.Combobox(frm, textvariable=self.range_var, values=WEAPON_RANGES, state="readonly",
                      width=10).grid(row=2, column=1, sticky="w", pady=2)
-        self._build_calculator(frm, w, scale, weapons_rating)
+        self._build_calculator(frm, w, scale, weapons_rating, is_new=weapon is None)
         qbox = ttk.LabelFrame(frm, text="Qualities (editable)", padding=6)
         qbox.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.q_vars = {}
@@ -1892,15 +1896,21 @@ class WeaponDialog(tk.Toplevel):
         for var in watched:
             var.trace_add("write", lambda *_a: self._refresh_calc())
         self._show_selectors()
+        self._last_key = self._selection_key()
         self._refresh_calc()
         make_modal(self, parent)
 
     # ------------------------------------------------------------ calculator
-    def _build_calculator(self, frm, w, scale, weapons_rating):
+    def _build_calculator(self, frm, w, scale, weapons_rating, is_new=False):
         calc = ttk.LabelFrame(frm, text="Auto-Calculate Weapon Stats (Core Rulebook pp. 228-230)",
                               padding=6)
         calc.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        etype, delivery, ttype = weapon_profile(w)
+        # A saved profile links the weapon to the calculator. A profile guessed from the
+        # name only pre-selects the dropdowns; it links once the GM picks a type or
+        # clicks Auto-Populate. A new weapon starts as a custom weapon.
+        saved = bool(w.energy_type or w.delivery or w.torpedo_type)
+        self.linked = saved
+        etype, delivery, ttype = ("", "", "") if is_new else weapon_profile(w)
         self.etype_var = tk.StringVar(value=etype or self.CUSTOM)
         self.delivery_var = tk.StringVar(value=delivery or self.CUSTOM)
         self.ttype_var = tk.StringVar(value=ttype or self.CUSTOM)
@@ -1925,8 +1935,10 @@ class WeaponDialog(tk.Toplevel):
 
         ship_row = ttk.Frame(calc)
         ship_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.calc_scale_var = tk.IntVar(value=clamp(to_int(scale, 4), 1, 10))
-        self.calc_weapons_var = tk.IntVar(value=clamp(to_int(weapons_rating, 8), 1, 16))
+        self._ship_scale = clamp(to_int(scale, 4), 1, 10)
+        self._ship_weapons = clamp(to_int(weapons_rating, 8), 1, 16)
+        self.calc_scale_var = tk.IntVar(value=self._ship_scale)
+        self.calc_weapons_var = tk.IntVar(value=self._ship_weapons)
         ttk.Label(ship_row, text="Ship Scale").pack(side="left")
         ttk.Spinbox(ship_row, from_=1, to=10, textvariable=self.calc_scale_var,
                     width=4).pack(side="left", padx=(4, 8))
@@ -1935,7 +1947,7 @@ class WeaponDialog(tk.Toplevel):
                     width=4).pack(side="left", padx=(4, 8))
         self.bonus_lbl = ttk.Label(ship_row, text="", style="Bold.TLabel")
         self.bonus_lbl.pack(side="left")
-        self.bonus_var = tk.BooleanVar(value=True)
+        self.bonus_var = tk.BooleanVar(value=w.include_bonus)
         ttk.Checkbutton(calc, text="Add the Weapons System Damage Bonus to the Damage rating",
                         variable=self.bonus_var).grid(row=2, column=0, sticky="w")
         self.calc_lbl = ttk.Label(calc, text="", style="Bold.TLabel", wraplength=470)
@@ -1958,12 +1970,21 @@ class WeaponDialog(tk.Toplevel):
             return "" if v == self.CUSTOM else v
         return val(self.etype_var), val(self.delivery_var), val(self.ttype_var)
 
+    def _calc_inputs_valid(self) -> bool:
+        try:
+            self.calc_scale_var.get()
+            self.calc_weapons_var.get()
+        except (tk.TclError, ValueError):
+            return False
+        return True
+
     def standard(self):
         """(Weapon, parts) for the current selection, or (None, []) if incomplete."""
         etype, delivery, ttype = self._selection()
-        return calculate_weapon(self.type_var.get(), int_var_value(self.calc_scale_var, 4),
-                                int_var_value(self.calc_weapons_var, 8), etype, delivery, ttype,
-                                include_bonus=self.bonus_var.get())
+        return calculate_weapon(self.type_var.get(),
+                                int_var_value(self.calc_scale_var, self._ship_scale),
+                                int_var_value(self.calc_weapons_var, self._ship_weapons),
+                                etype, delivery, ttype, include_bonus=self.bonus_var.get())
 
     def _show_selectors(self):
         if self.type_var.get() == "Torpedo":
@@ -1973,19 +1994,37 @@ class WeaponDialog(tk.Toplevel):
             self.torp_row.grid_remove()
             self.energy_row.grid()
 
+    def _selection_key(self):
+        return (self.type_var.get(),) + self._selection()
+
     def _on_type_change(self):
         self._show_selectors()
-        self._on_selection()
+        if self.linked:
+            self._on_selection()
+        else:
+            self._refresh_calc()
 
     def _on_selection(self):
-        if self.autofill_var.get() and self.standard()[0] is not None:
+        """A dropdown was picked: auto-fill if the selection actually changed."""
+        key = self._selection_key()
+        changed = key != getattr(self, "_last_key", None)
+        self._last_key = key
+        self.linked = self.linked or any(self._selection())
+        if changed and self.autofill_var.get() and self.standard()[0] is not None:
             self.auto_populate()
         else:
             self._refresh_calc()
 
     def _on_ship_values_change(self):
+        """Scale / Weapons / bonus box changed: the damage follows the standard only while
+        it still equals the previous standard (a hand-set damage is kept)."""
+        if not self._calc_inputs_valid():
+            self._refresh_calc()
+            return
+        previous = self._std_damage
         std = self.standard()[0]
-        if self.autofill_var.get() and std is not None:
+        if (self.autofill_var.get() and self.linked and std is not None
+                and previous is not None and int_var_value(self.dmg_var, -1) == previous):
             self.dmg_var.set(std.damage)       # only the damage depends on Scale / Weapons
         self._refresh_calc()
 
@@ -1997,6 +2036,7 @@ class WeaponDialog(tk.Toplevel):
                 "an Energy Type and a Delivery Method"
             self.calc_status_lbl.configure(text=f"Select {what} first.", style="Alert.TLabel")
             return False
+        self.linked = True
         self._filling = True
         try:
             self.name_var.set(std.name)
@@ -2025,6 +2065,7 @@ class WeaponDialog(tk.Toplevel):
         self.bonus_lbl.configure(
             text=f"\u2192 Weapons System Damage Bonus +{weapons_damage_bonus(rating)}")
         std, parts = self.standard()
+        self._std_damage = std.damage if std is not None else None
         if std is None:
             self.calc_lbl.configure(text="Standard: - (pick a type above, or keep a custom "
                                          "weapon)")
@@ -2042,12 +2083,14 @@ class WeaponDialog(tk.Toplevel):
             diffs.append(f"Range {self.range_var.get()} (standard {std.range})")
         if self.current_qualities() != std.qualities:
             diffs.append("qualities edited")
+        unlinked = ("" if self.linked else " Guessed from the name - not linked to the "
+                    "calculator until you pick a type or click Auto-Populate.")
         if diffs:
             self.calc_status_lbl.configure(
                 text="Customised: " + "; ".join(diffs) + ". Auto-Populate restores the "
-                     "standard values.", style="Alert.TLabel")
+                     "standard values." + unlinked, style="Alert.TLabel")
         else:
-            self.calc_status_lbl.configure(text="\u2713 Matches the standard values.",
+            self.calc_status_lbl.configure(text="\u2713 Matches the standard values." + unlinked,
                                            style="Good.TLabel")
 
     # ------------------------------------------------------------ result
@@ -2057,13 +2100,14 @@ class WeaponDialog(tk.Toplevel):
             messagebox.showerror("Weapon", "The weapon needs a name.", parent=self)
             return
         wtype = self.type_var.get()
-        etype, delivery, ttype = self._selection()
+        etype, delivery, ttype = self._selection() if self.linked else ("", "", "")
         energy = wtype == "Energy"
         self.result = Weapon(name, wtype, max(0, int_var_value(self.dmg_var, 0)),
                              self.range_var.get(), self.current_qualities(),
                              energy_type=etype if energy else "",
                              delivery=delivery if energy else "",
-                             torpedo_type=ttype if not energy else "")
+                             torpedo_type=ttype if not energy else "",
+                             include_bonus=self.bonus_var.get())
         self.destroy()
 
     @classmethod
@@ -2324,14 +2368,17 @@ class ShipEditor(tk.Toplevel):
         return {"scale": clamp(int_var_value(self.scale_var, 4), 1, 10),
                 "weapons_rating": max(1, int_var_value(self.sys_vars["Weapons"], 8))}
 
-    def weapon_damage_updates(self) -> list:
-        """(weapon, new damage) for Auto-Calculated weapons whose damage differs from the
-        standard for the current Scale / Weapons rating (bonus included)."""
+    def _standard_for(self, w):
         ctx = self._weapon_context()
+        return calculate_weapon(w.wtype, ctx["scale"], ctx["weapons_rating"], w.energy_type,
+                                w.delivery, w.torpedo_type, include_bonus=w.include_bonus)[0]
+
+    def weapon_damage_updates(self) -> list:
+        """(weapon, new damage) for calculator-linked weapons whose damage differs from the
+        standard for the current Scale / Weapons rating (each weapon's bonus setting)."""
         out = []
         for w in self.weapons:
-            std, _parts = calculate_weapon(w.wtype, ctx["scale"], ctx["weapons_rating"],
-                                           w.energy_type, w.delivery, w.torpedo_type)
+            std = self._standard_for(w)
             if std is not None and std.damage != w.damage:
                 out.append((w, std.damage))
         return out
@@ -2339,11 +2386,10 @@ class ShipEditor(tk.Toplevel):
     def _recalc_weapons(self):
         ctx = self._weapon_context()
         updates = self.weapon_damage_updates()
-        linked = [w for w in self.weapons if w.energy_type or w.torpedo_type]
-        unlinked = [w.name for w in self.weapons if w not in linked]
+        unlinked = [w.name for w in self.weapons if self._standard_for(w) is None]
         note = ("\n\nNot linked to the calculator (left unchanged): " + ", ".join(unlinked)
-                + ".\nOpen them with Edit... and use Auto-Populate to link them."
-                if unlinked else "")
+                + ".\nOpen them with Edit... and pick a type or use Auto-Populate to link "
+                  "them." if unlinked else "")
         head = (f"Scale {ctx['scale']}, Weapons {ctx['weapons_rating']} (Weapons System "
                 f"Damage Bonus +{weapons_damage_bonus(ctx['weapons_rating'])})")
         if not updates:
@@ -2352,11 +2398,26 @@ class ShipEditor(tk.Toplevel):
             self._regrab()
             return
         lines = "\n".join(f"  {w.name}: Damage {w.damage} \u2192 {dmg}" for w, dmg in updates)
-        if messagebox.askyesno("Recalc Damage", f"{head}:\n\n{lines}\n\nApply the standard "
-                               "damage? Ranges, names and qualities are kept." + note,
-                               parent=self):
-            for w, dmg in updates:
-                w.damage = dmg
+        question = (f"{head}:\n\n{lines}\n\nApply the standard damage? Ranges, names and "
+                    "qualities are kept.")
+        if len(updates) == 1:
+            chosen = updates if messagebox.askyesno("Recalc Damage", question + note,
+                                                    parent=self) else []
+        else:
+            ans = messagebox.askyesnocancel(
+                "Recalc Damage", question + "\n\nYes = update all, No = choose weapon by "
+                "weapon, Cancel = change nothing." + note, parent=self)
+            if ans is None:
+                chosen = []
+            elif ans:
+                chosen = updates
+            else:
+                chosen = [(w, dmg) for w, dmg in updates if messagebox.askyesno(
+                    "Recalc Damage", f"{w.name}: Damage {w.damage} \u2192 {dmg}?\n\n"
+                                     "No keeps the current (hand-set) damage.", parent=self)]
+        for w, dmg in chosen:
+            w.damage = dmg
+        if chosen:
             self._refresh_tree()
         self._regrab()
 
