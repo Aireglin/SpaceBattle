@@ -2403,6 +2403,10 @@ class CombatHelperApp:
                                         padx=6, pady=4, relief="solid", borderwidth=1)
         self.breach_warn_lbl.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.breach_warn_lbl.grid_remove()
+        self.failing_btn = ttk.Button(sf, text="Spend 1 Threat \u2192 Set Offline",
+                                      command=self.failing_to_offline_acting)
+        self.failing_btn.grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self.failing_btn.grid_remove()
 
         of = ttk.LabelFrame(body, text="Action Options", padding=6)
         of.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -2999,6 +3003,8 @@ class CombatHelperApp:
         ship = self.attacker
         # Crew defaults follow the attacker's Crew Quality when the attacker changes.
         if ship is not None and ship.name != self._last_attacker:
+            if self.override_var.get() and self._last_attacker is not None:
+                self.override_var.set(False)       # Override belonged to the previous ship
             a, d = ship.crew_ratings()
             self.crew_attr_var.set(a)
             self.crew_dept_var.set(d)
@@ -3120,7 +3126,7 @@ class CombatHelperApp:
             return
         self.kind_lbl.configure(text=adef["kind"].upper(),
                                 style=f"{adef['kind']}.TLabel")
-        set_enabled(self.override_cb, adef["roll"])
+        set_enabled(self.override_cb, adef["roll"] or self.override_var.get())
         set_enabled(self.other_base_sb, bool(adef.get("custom_base")))
         warnings = [w for w, level in self._breach_warnings(ship, name, adef) if level == "warn"]
         if warnings:
@@ -3128,6 +3134,10 @@ class CombatHelperApp:
             self.breach_warn_lbl.grid()
         else:
             self.breach_warn_lbl.grid_remove()
+        if self._failing_systems(ship, name, adef):
+            self.failing_btn.grid()
+        else:
+            self.failing_btn.grid_remove()
         self.actor_lbl.configure(
             text=f"Acting: {ship.name if ship else '-'}   ->   Target: "
                  f"{target.name if target else '-'}")
@@ -3218,6 +3228,13 @@ class CombatHelperApp:
         out = []
         if ship is None or adef is None or name == "Restore":
             return out
+        if name == "Prepare":
+            for sysname, what in (("Weapons", "arming weapons"), ("Engines", "Prepare for Warp")):
+                if ship.breach_condition(sysname) == "Offline":
+                    out.append((f"{sysname} {self._be(sysname)} OFFLINE: {what} needs a GM "
+                                "override (shields are unaffected).", "info"))
+            return out
+        included = "(included)" if adef["roll"] else "on tasks that use it"
         for sysname in action_systems(adef):
             cond = ship.breach_condition(sysname)
             be = self._be(sysname)
@@ -3232,12 +3249,12 @@ class CombatHelperApp:
                             "action is required this turn before taking Major Actions or tasks "
                             "that use it.", "warn"))
             elif cond == "Failing":
-                out.append((f"\u26a0 WARNING: {sysname} {be} Failing: +1 Difficulty (included). "
-                            "The GM may spend 1 Threat to set it Offline (Breach Tracker).",
+                out.append((f"\u26a0 WARNING: {sysname} {be} Failing: +1 Difficulty {included}. "
+                            "The GM may spend 1 Threat to set it Offline (button below).",
                             "warn"))
             elif cond == "Primary Offline":
                 out.append((f"\u26a0 {sysname}: Primary Offline, switching to backup - +1 "
-                            "Difficulty (included).", "warn"))
+                            f"Difficulty {included}.", "warn"))
             elif cond == "Damaged":
                 out.append((f"{sysname} {be} Damaged: mostly functional - the GM may spend "
                             "Threat to cause a complication.", "info"))
@@ -3272,13 +3289,19 @@ class CombatHelperApp:
             L.append(("Ship Assist: none", ""))
         L.append((f"Ship system used: {adef['system']}" if adef["system"]
                   else "Ship system used: none (standard action)", ""))
-        if total is not None:
+        if adef["roll"]:
             base_total, parts = self.compute_current_difficulty()
-            if base_total == total:
-                L.append(("Difficulty: " + format_difficulty_hint(total, parts), "key"))
+            defense = (self._defense_mode(target) if adef["attack"] and target is not None
+                       and target is not ship else None)
+            if defense and parts:
+                opp = (str(int_var_value(self.opp_var, 0)) if self.mode_var.get() == "manual"
+                       else "?")
+                mods = "".join(f" {'+' if v > 0 else '-'} {abs(v)} ({label})"
+                               for label, v in parts[1:] if v)
+                L.append((f"Difficulty (opposed): Defender's successes {opp}{mods} = Total "
+                          f"Difficulty {total if total is not None else '?'}", "key"))
             else:
-                L.append((f"Difficulty: Total Difficulty {total} (opposed: defender's successes "
-                          "+ modifiers)", "key"))
+                L.append(("Difficulty: " + format_difficulty_hint(base_total, parts), "key"))
         L.append(("Rule: " + adef["reminder"], ""))
 
         if name == "Fire":
@@ -3668,6 +3691,8 @@ class CombatHelperApp:
         if ship is None:
             return
         ship.turns_used = max(0, ship.turns_used + delta)
+        if delta > 0:
+            ship.restored_systems = []       # a turn ended: Restore must be taken again
         if delta > 0 and ship.brace_for_impact:
             ship.brace_for_impact = False
             self.log(f"{ship.name} spends its turn braced (no Major Action). Brace for Impact "
@@ -3715,6 +3740,7 @@ class CombatHelperApp:
             ship.persistent_effects = [e for e in ship.persistent_effects if e["rounds"] > 0]
         for ship in self.ships:
             ship.reset_round()
+        self.override_var.set(False)
         self.log(f"--- END OF ROUND {ended} ---", "separator")
         self.round += 1
         self.log(f"Round {self.round} begins: turn counters, Modulate Shields, Evasive Action, "
@@ -3752,7 +3778,12 @@ class CombatHelperApp:
             self.show_error("No weapon", f"{ship.name} has no weapon selected. Add weapons in "
                                          "the ship editor.")
             return
-        reuse_threat = self._precheck_action(ship, name, adef, weapon, target)
+        reaction = (adef["kind"] == "Major" and bool(ship.readied_action)
+                    and name not in ("Ready", "Pass") and self.ask_yes_no(
+                        "Readied action", f"{ship.name} has a readied action:\n"
+                                          f"{ship.readied_action}\n\nResolve {name} as that "
+                                          "reaction (no extra turn)?"))
+        reuse_threat = self._precheck_action(ship, name, adef, weapon, target, reaction)
         if reuse_threat is None:
             return
         difficulty, parts = self.compute_current_difficulty()
@@ -3770,16 +3801,22 @@ class CombatHelperApp:
         if adef["requires_power"] and ship.reserve_power:
             ship.reserve_power = False
             self.log(f"{ship.name} consumes its Reserve Power.")
-        if adef["kind"] == "Major":
+        if reaction:
+            if adef["system"] and adef["system"] not in ship.systems_used:
+                ship.systems_used.append(adef["system"])
+            self.log(f"{ship.name}: {name} resolved as the readied reaction "
+                     f"({ship.readied_action}) - no extra turn used.", "success")
+            ship.readied_action = ""
+        elif adef["kind"] == "Major":
             self._consume_turn(ship, adef["system"])
         self._apply_effect(ship, name, adef, target, weapon, outcome)
-        if self.override_var.get():
+        if self.override_var.get() and (adef["kind"] == "Major" or adef["roll"]):
             self.override_var.set(False)
             self.log(f"Override used for {name}"
                      + (" (+1 Difficulty applied)." if adef["roll"] else " (no task roll)."))
         self.changed()
 
-    def _precheck_action(self, ship, name, adef, weapon, target=None):
+    def _precheck_action(self, ship, name, adef, weapon, target=None, reaction=False):
         """Warnings / confirmations. Returns Threat to spend for system re-use, or None to abort."""
         reuse_threat = 0
         band = self.range_var.get()
@@ -3791,11 +3828,11 @@ class CombatHelperApp:
             self.show_info("Cloak", f"{ship.name} is already cloaked.")
             return None
         if adef["kind"] == "Major":
-            if ship.brace_for_impact and name != "Pass" and not self.ask_yes_no(
+            if ship.brace_for_impact and name != "Pass" and not reaction and not self.ask_yes_no(
                     "Brace for Impact!", f"{ship.name} is bracing for impact and cannot take a "
                                          "Major Action this turn.\n\nOverride and act anyway?"):
                 return None
-            if ship.turns_used >= ship.scale:
+            if ship.turns_used >= ship.scale and not reaction:
                 if not self.ask_yes_no(
                         "Turn budget exceeded",
                         f"{ship.name} has already used {ship.turns_used}/{ship.scale} turns "
@@ -3854,7 +3891,7 @@ class CombatHelperApp:
                                       "\n\nProceed anyway (GM override)?"):
                 return None
             self.log(f"GM override: {ship.name} targets the cloaked {target.name}.", "alert")
-        systems = [] if name == "Restore" else action_systems(adef)
+        systems = [] if name in ("Restore", "Prepare") else action_systems(adef)
         for sysname in systems:
             if ship.breach_condition(sysname) == "Offline":
                 if not self.ask_yes_no(
@@ -4247,6 +4284,10 @@ class CombatHelperApp:
         self.override_var.set(True)
         self.station_var.set(choice)
         self.on_station_change()
+        majors = [n for n, a in BRIDGE_STATIONS[choice].items() if a["kind"] == "Major"]
+        if majors:
+            self.action_var.set(majors[0])
+            self.on_action_change()
         self.log(f"{ship.name}: Override - pick the {choice} action to perform; it is +1 "
                  "Difficulty (Override box ticked).")
 
@@ -4318,6 +4359,15 @@ class CombatHelperApp:
         if choice is None:
             self.log(f"{ship.name}: Prepare cancelled.")
             return
+        needed = ("Weapons" if choice == "Weapons: Arm"
+                  else "Engines" if choice == "Prepare for Warp" else "")
+        if needed and ship.breach_condition(needed) == "Offline":
+            if not self.ask_yes_no("Subsystem offline",
+                                   f"{ship.name}'s {needed} {self._be(needed)} OFFLINE - "
+                                   f"{choice} cannot be done.\n\nGM override and do it anyway?"):
+                self.log(f"{ship.name}: {choice} blocked - {needed} offline.")
+                return
+            self.log(f"GM override: {ship.name} uses its OFFLINE {needed} ({choice}).", "alert")
         if choice.startswith("Shields"):
             if ship.shields_up:
                 self._lower_shields(ship)
@@ -4600,7 +4650,9 @@ class CombatHelperApp:
                  + (" [High Yield]" if count > 1 else "")
                  + (" [Devastating]" if devastating else "")
                  + f". {sysname} breaches: {target.breaches[sysname]}.", "alert")
-        self.resolve_breach_nature(target, sysname, reason)
+        for i in range(count):
+            self.resolve_breach_nature(target, sysname, reason + (
+                f" - breach {i + 1} of {count}" if count > 1 else ""))
 
     def resolve_breach_nature(self, ship, sysname, reason):
         """Ask the GM for the Nature of Breach and attach it to the system."""
@@ -4641,9 +4693,25 @@ class CombatHelperApp:
         self.log(f"GM sets {t.name} {sysname} condition: {nature or 'none'}.", "alert")
         self.changed()
 
-    def failing_to_offline(self, sysname):
+    def _failing_systems(self, ship, name, adef):
+        if ship is None or adef is None or name in ("Restore", "Prepare"):
+            return []
+        return [s_ for s_ in action_systems(adef) if ship.breach_condition(s_) == "Failing"]
+
+    def failing_to_offline_acting(self):
+        """Middle-panel button: the acting ship's Failing subsystem goes Offline for 1 Threat."""
+        ship = self.attacker
+        failing = self._failing_systems(ship, self.action_var.get(), self.current_action())
+        if not failing:
+            return
+        sysname = failing[0] if len(failing) == 1 else self.ask_choice(
+            "Set Offline", "Which Failing subsystem goes Offline?", failing, failing[0])
+        if sysname:
+            self.failing_to_offline(sysname, ship)
+
+    def failing_to_offline(self, sysname, ship=None):
         """GM button: spend 1 Threat to push a Failing subsystem Offline."""
-        t = self.target
+        t = ship or self.target
         if t is None or t.breach_condition(sysname) != "Failing":
             return
         if self.threat < 1:
@@ -5001,6 +5069,7 @@ class CombatHelperApp:
             self.ships.append(ship)
         self.round, self.threat, self.momentum = round_, threat, momentum
         self.gm_mod_var.set(gm_mod)
+        self.override_var.set(False)
         self.hit_table_var.set(table)
         self.attacker_var.set(attacker if isinstance(attacker, str) else "")
         self.target_var.set(target if isinstance(target, str) else "")
@@ -5033,6 +5102,7 @@ class CombatHelperApp:
         self.ships = preset_ships()
         self.round, self.threat, self.momentum = 1, 0, 0
         self.scene_traits = []
+        self.override_var.set(False)
         self.attacker_var.set(self.ships[0].name)
         self.target_var.set(self.ships[1].name)
         self.pending_attack = None

@@ -116,10 +116,19 @@ Difficulty 2), with the Attribute + Department and ship assist the Rule Hints su
   one. Traits live in the **Scene Traits** list (right panel), which is saved with the
   roster. *Combat → New Scene* offers to clear it.
 * **Override** asks which station you control. It switches the selector to that
-  station and ticks the *Override* box, so the task you then pick is +1 Difficulty.
-  Override itself uses no extra turn, and the box clears after the task.
+  station, preselects its first Major Action and ticks the *Override* box, so the task
+  you then pick is +1 Difficulty. Override itself uses no extra turn. The box stays
+  ticked through Minor and Free actions, clears after the Major Action or task roll,
+  and is also cleared when the acting ship changes, at End Round and when a roster is
+  loaded.
 * **Pass** uses the turn without a Major Action, and is allowed while Bracing for
-  Impact. **Ready** records the trigger and the readied action until End Round.
+  Impact. **Ready** records the trigger and the readied action until End Round. When
+  that ship next resolves a Major Action, the app asks whether it's the readied
+  reaction. If yes, it uses no extra turn (even when the turn budget is spent), skips
+  the Brace for Impact prompt and clears the readied action.
+* **Prepare** isn't blocked by an Offline subsystem in general. Only the choices that
+  need it are: *Weapons: Arm* needs Weapons and *Prepare for Warp* needs Engines (GM
+  override possible). Lowering or raising Shields always works.
 * **Other Tasks** takes its base Difficulty from the *Other Task base Difficulty*
   box. You set its Attribute and Department in the Action Resolver.
 * The **Rule Hints** box always shows the Difficulty in the form
@@ -139,7 +148,7 @@ the dropdown; *Skip* leaves the system's condition unchanged.
 | 1–4 | **Damaged** | Mostly functional. A reminder suggests the GM spend Threat on a complication |
 | 5–8 | **Malfunctioning** | Before any task or Major Action that uses the subsystem, a **Restore** minor action is needed that turn. The app offers to take it (or a GM override). A Restore lasts until the ship's turn ends |
 | 9–12 | **Primary Offline** (switching to backup) | +1 Difficulty to every task using the subsystem, added automatically |
-| 13–16 | **Failing** | +1 Difficulty to every task using the subsystem, added automatically. The Breach Tracker's **→ Offline** button spends 1 Threat to set it Offline |
+| 13–16 | **Failing** | +1 Difficulty to every task using the subsystem, added automatically. **Spend 1 Threat → Set Offline** appears below the warning box when the acting ship's chosen action uses the Failing subsystem; the Breach Tracker's **→ Offline** button does the same for the target |
 | 17–20 | **Offline** | Actions using the subsystem are blocked (GM override only) |
 
 * A task "uses" a subsystem when it's the action's station system or its
@@ -176,8 +185,10 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   * Losing Power for Regain Power
   * Jammed for Comms / Sensors tasks
   * Devastating breaches for Damage Control
-* **Opposed tasks** (the target used Evasive Action or Defensive Fire): the defender
-  rolls first, Daring + Conn or Daring + Security with the ship assisting. Their
+* **Opposed tasks** (the target used Evasive Action or Defensive Fire). The Rule Hints
+  show `Defender's successes ? + 1 (GM Modifier) = Total Difficulty ?` until the
+  defender has rolled. The defender rolls first, Daring + Conn or Daring + Security
+  with the ship assisting. Their
   successes **replace the base Difficulty**; every other modifier still applies, and a
   tie goes to the attacker. In auto mode the defender roll is made for you.
 * **Dice:** each d20 that rolls ≤ Attribute + Department is a success, and a roll ≤
@@ -200,7 +211,8 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   Shaken by the same attack. A hit that takes Shields to 0 also makes the ship Shaken
   for each threshold it crosses. One hit causes at most one breach from these
   triggers, and High Yield adds one more. Each breach rolls on the System Hit table,
-  or you pick the system when Targeting Solution allows it.
+  or you pick the system when Targeting Solution allows it. Every breach gets its own
+  Nature of Breach roll, so a High Yield hit opens the resolver twice.
 * **System Hit table:** the default is the d12 table you specified (1–2 Comms …
   11–12 Weapons). A weighted d20 table (1 Comms, 2 Computers, 3–6 Engines, 7–9
   Sensors, 10–17 Structure, 18–20 Weapons) can be selected in the System Hit
