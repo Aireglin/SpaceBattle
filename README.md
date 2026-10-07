@@ -36,8 +36,8 @@ PyInstaller does not cross-compile, so build the `.exe` on Windows.
 * The roster file is kept **next to the executable**, or next to `main.py` when you
   run from source. If it exists, it loads automatically on startup. Otherwise the
   app starts with the two preset ships.
-* **Save Roster to JSON** and **Load Roster from JSON** are on the top bar and in the
-  File menu, with `Ctrl+S` as a shortcut. A save stores every ship's full combat
+* **Save Roster to JSON** and **Load Roster from JSON** are in the *Fleet & Roster*
+  tab and in the File menu, with `Ctrl+S` as a shortcut. A save stores every ship's full combat
   state (shields, breaches with their Nature of Breach, talents, cloak, effects, turns
   used) plus Round, Threat, Momentum, GM Modifier, the system hit table, the Scene
   Traits and the Attacker / Target selection.
@@ -56,25 +56,64 @@ PyInstaller does not cross-compile, so build the `.exe` on Windows.
 
 ## Screen layout
 
-| Area | Contents |
-|---|---|
-| **Top bar** | Threat and Momentum counters (Momentum is capped at 6), Round counter, **END ROUND** button, GM Modifier spinbox (−3…+5), Save / Load buttons. The **Combat** menu has End Round, *New Scene* and *New Adventure*. |
-| **Left** | Ship roster (`[A]` = attacker, `[T]` = target), Attacker / Target pickers, New / Edit / Duplicate / Delete / Export / Import / Full Repair, the **Custom Ship / NPC Generator** (Scale, Crew Quality, role profile, **Starship Talents multi-selector**), **Active Ship Status** (shield bar, Shields and Resistance with their talent bonuses broken out, **Cloak toggle**, Crew Support and Small Craft trackers, talents, effects) and the **Turn Tracker** ("Turns used: X / Scale") |
-| **Middle** | Two-level **Station → Action** selector, a red **breach warning box** when the chosen action uses a breached subsystem, action options (weapon, salvo, range, Targeting Solution and Scan for Weakness choices, Secondary Reactors button, **Override (+1 Difficulty)** box, **Other Task base Difficulty**), live **Difficulty** breakdown, **Rule Hints** box, and the **Action Resolver** (crew Attribute + Department, Focus, dice pool, ship assist, auto-roll or manual successes, opposed defender successes) |
-| **Right** | Target status with shield bar and the 50% / 25% markers, Resistance, effects, toggles for Reserve Power, shields, weapons, Point Defense and the target's cloak, manual shield adjustment, **Active Quality & Talent Alerts**, the **Damage Resolver**, the **System Hit Generator** (switchable table), the **Shaken Resolver**, the **Breach Tracker** (breaches, Nature of Breach per system, *→ Offline* button), complications and **Scene Traits** |
-| **Bottom** | Scrollable, colour-coded **Combat History Log** |
+The window has a **global header** that is always visible, and three tabs that follow
+the game flow. Switch tabs with a click, the **View** menu or `Ctrl+1` / `Ctrl+2` /
+`Ctrl+3`.
 
-The ship editor (*New…* / *Edit…*) sets base Shields and Resistance, Tractor Beam
-Strength, systems, departments, weapons with qualities, and a **talents and special
-rules multi-select**. You can also add custom talents there, which show up as
-reminders. A live line shows the effective Shields, Resistance, Tractor and Small
-Craft values once talents are applied.
+**Header (all tabs):** Threat and Momentum counters with − / + (Momentum is capped at
+6), the Round counter with **END ROUND**, the GM Modifier spinbox (−3…+5) and the
+roster file name, which flags unsaved changes. The **Combat** menu has End Round,
+*New Scene* and *New Adventure*.
+
+### Tab 1 – Combat Dashboard (the GM's view during turns)
+
+| Column | Contents |
+|---|---|
+| **Step 1 · Active Combatants** | Attacker / Target dropdowns with **Swap**. The **Active Attacker** card shows name, class, Scale, crew, shield bar, Shields and Resistance (talent bonuses broken out), **Turns used / Scale** with +1 / −1 / Reset, systems used this round, a **Reserve Power** toggle, the **Cloak** button, Crew Support and Small Craft trackers, and *Show ship details* for the full stat block. **Target Quick Status** shows the target's shield bar with the 50% / 25% markers, Resistance, its **breaches** (with Nature of Breach), effects, quick shield buttons (−1 / +1 / Set / Reset), and toggles for Reserve Power, shields, weapons, Point Defense and cloak. Below them sit the target's **Complications** and the **Scene Traits**. |
+| **Step 2 · Action & Rule Guidance** | **Station → Action** selector with the Major / Minor / Free badge and a red **breach warning box**. **Action Parameters** shows only the options that apply to the chosen action: weapon, torpedo salvo, range, Targeting Solution, Scan for Weakness, Regenerate Shields, Secondary Reactors, Override, Other Task base Difficulty. The **Difficulty** box shows the breakdown `Base + Weapon Mods + Context + GM Mod = Final Difficulty`. The **Rule Hint Card** gives the Attribute + Department TN, ship-assist TN, critical range, rule text and warnings, with the active talent and weapon-quality reminders underneath. **Roll & Resolve** has crew ratings, Focus, dice pool, ship assist, auto-roll or manual successes, and opposed defender successes. |
+| **Step 3 · Damage & Breach Resolution** | The **Tactical Combat Resolver**: pending hit, weapon, base damage rating, extra damage bought with Momentum, Piercing and Devastating Attack, a live preview and **APPLY DAMAGE TO TARGET**. The **System Hit & Breach Roller**: *Roll System Hit* with the table's distribution shown, *Add Breach There*, **Roll Nature of Breach (d20)** and the **Breach Manager** (breaches, Nature of Breach per system, *→ Offline*). The **Shaken Handler**: the target's thresholds and Shaken state (detected automatically when damage is applied), plus the Shaken Resolver with Auto-Roll d20 or a manual choice. |
+| **Combat Log** (bottom) | Scrollable, colour-coded log with highlighted `=== ROUND n ===` / `END OF ROUND` separators |
+
+### Tab 2 – Fleet & Roster
+
+A **summary table** of every ship in the scene: role (A = attacker,
+blue row; T = target, red row), name, side, class, Scale, Shields, Resistance, breach
+count, turns used and a status column (Shaken, cloak, lowered shields, breach
+conditions, missing Reserve Power and so on). Double-clicking a row makes it the
+Attacker. Below the table are **Set as Attacker / Set as Target / Swap**, **New Ship…**,
+**Edit in Ship Creator**, **Duplicate**, **Delete** and **Full Repair**. On the right:
+**Save / Load Roster to/from JSON**, *Save As…*, *Load From File…*, *Reset Roster to
+Presets*, **Import Ship(s)…** / **Export Selected Ship…**, and the full details of the
+selected ship.
+
+### Tab 3 – Ship Creator & Generator
+
+* **NPC Quick Generator** (left): name, Scale, Crew Quality, *Spaceframe Profile*
+  (Balanced, Warship, …) and the Starship Talents multi-select. **Generate NPC →
+  Roster** adds the ship straight away. **Generate into Ship Creator** opens it in the
+  creator so you can tweak it before saving. *Edit a roster ship* loads any roster ship
+  into the creator.
+* **Custom Ship Creator** (middle): name, spaceframe / class, side, Scale, Crew
+  Quality, base Shields and Resistance (with *Auto-calc*), Tractor Beam, systems,
+  departments, the **talents and special rules multi-select** (custom talents work as
+  reminders) and notes. A live line shows the effective Shields, Resistance, Tractor
+  and Small Craft values once talents are applied. **Save Changes** / **Save to
+  Roster** and **Save as New Ship** sit at the top.
+* **Weapons & Auto-Calculator** (right): the ship's weapon list and an inline weapon
+  form with the calculator (see below). Select a weapon to load it into the form, then
+  **Update Selected Weapon**, or use **Add as New Weapon** / **Remove Selected** /
+  **Recalc Damage**.
+* The creator works on a copy. Saving writes your changes onto the **live** roster
+  ship, so damage, breaches and turns it took while you were editing are kept. A
+  rename carries over to the Attacker / Target selection. Unsaved creator edits are
+  marked with `*` on the tab and `● unsaved edits`; the app asks before discarding
+  them (loading another ship, *New Blank Ship*, or exiting).
 
 ## Weapon Auto-Calculator
 
-*Add Weapon…* and *Edit…* in the ship editor open the weapon dialog. Its
-**Auto-Calculate Weapon Stats** section fills in the standard stats from the Core
-Rulebook weapon tables (pp. 228–230).
+The weapon form in the Ship Creator tab has an **Auto-Calculate Weapon Stats**
+section. It fills in the standard stats from the Core Rulebook weapon tables
+(pp. 228–230).
 
 * **Energy weapons** take two selectors, **Energy Type** and **Delivery Method**:
 
@@ -142,7 +181,7 @@ Rulebook weapon tables (pp. 228–230).
   file. A new weapon starts as a custom (unlinked) weapon. When you edit an older
   weapon, the dropdowns are pre-set from a guess based on its name (*Photon
   Torpedoes* → Photon). The guess doesn't link the weapon or change any value.
-* **Recalc Damage** in the ship editor updates the damage of linked weapons after a
+* **Recalc Damage** in the Ship Creator updates the damage of linked weapons after a
   Scale or Weapons change, using each weapon's own bonus setting. When several
   weapons would change, you can update all of them or confirm weapon by weapon, so a
   hand-set damage can be kept. Range, name and qualities stay as they are. Unlinked
@@ -159,14 +198,14 @@ Rulebook weapon tables (pp. 228–230).
 | **Ablative Armor** | +2 Resistance, added automatically |
 | **Improved Hull Integrity** | +1 Resistance, added automatically |
 | **Advanced Shields** | +5 maximum Shields, added automatically |
-| **Cloaking Device** | Enables the **Cloak toggle** (Active Ship Status, or *Toggle Target Cloak*) and the Tactical actions **Cloak** (Major: Control + Engineering, Difficulty 2, assisted by Engines + Security, needs Reserve Power) and **Decloak** (Minor). While cloaked the ship has the *Cloaked* trait and its Shields drop to 0 and can't be raised. If it tries to Fire, Ram or use the Tractor Beam, the app offers to decloak it first (a Minor Action); its shields stay down until it uses Prepare. Enemies must **Reveal** it (Reason + Science, Difficulty 3) before they can target it, or the GM overrides. After that, the Cloaked trait still adds **+1 Difficulty** until End Round. |
+| **Cloaking Device** | Enables the **Cloak toggle** (Active Attacker card, or *Toggle Target Cloak*) and the Tactical actions **Cloak** (Major: Control + Engineering, Difficulty 2, assisted by Engines + Security, needs Reserve Power) and **Decloak** (Minor). While cloaked the ship has the *Cloaked* trait and its Shields drop to 0 and can't be raised. If it tries to Fire, Ram or use the Tractor Beam, the app offers to decloak it first (a Minor Action); its shields stay down until it uses Prepare. Enemies must **Reveal** it (Reason + Science, Difficulty 3) before they can target it, or the GM overrides. After that, the Cloaked trait still adds **+1 Difficulty** until End Round. |
 | **Extensive Shuttlebays** | Small Craft Readiness = Scale − 1, supports craft up to Scale 2 (runabouts). Comes with a deployed-craft tracker |
 | **Rapid-Fire Torpedo Launcher** | A torpedo salvo gets +1 Damage automatically, plus a reminder that Tactical may re-roll 1d20. In auto-roll mode the re-roll is done for you |
 | **Fast Targeting Systems** | Targeting Solution gives **both** the d20 re-roll **and** the choice of system hit |
 | **Advanced Sensor Suites** | When the ship assists a Sensors task it rolls 2d20 instead of 1d20, unless Sensors has breaches |
 | **Experimental Vessel / Prototype** | The ship's assist dice cause a complication on 18–20 |
 | **Abundant Personnel** | Doubles the Crew Support pool (Scale × 2). Comes with a used / available tracker |
-| **Point Defense System** | While active (a toggle in Target Status), torpedo attacks against the ship are +1 Difficulty (Cover) |
+| **Point Defense System** | While active (a toggle in Target Quick Status), torpedo attacks against the ship are +1 Difficulty (Cover) |
 | **Secondary Reactors** | After a Reroute Power action, a prompt offers **2 Momentum (Immediate) to restore Reserve Power**, once per scene. There's also a context button in Action Options. *Combat → New Scene* resets it |
 | **Rugged Design** | Damage Control re-rolls a failed d20. On success you're offered a second breach patch for 2 Momentum |
 | **Backup EPS Conduits, Improved Damage Control** | Reminders that pop up during Reroute Power, power loss (*Losing Power!*) and Damage Control |
@@ -181,7 +220,7 @@ It also lists every quality of the weapon in use.
 
 The Station dropdown has seven entries. Every station lists its Minor actions first,
 then its Major actions, and every station has its own **Create Trait** (Major,
-Difficulty 2), with the Attribute + Department and ship assist the Rule Hints suggest.
+Difficulty 2), with the Attribute + Department and ship assist the Rule Hint Card suggests.
 
 | Station | Minor | Major |
 |---|---|---|
@@ -195,7 +234,7 @@ Difficulty 2), with the Attribute + Department and ship assist the Rule Hints su
 
 * **Free** actions use neither a turn nor the Minor Action.
 * **Create Trait** asks on success whether to create a new trait, alter one or remove
-  one. Traits live in the **Scene Traits** list (right panel), which is saved with the
+  one. Traits live in the **Scene Traits** list (Step 1 column), which is saved with the
   roster. *Combat → New Scene* offers to clear it.
 * **Override** asks which station you control. It switches the selector to that
   station, preselects its first Major Action and ticks the *Override* box, so the task
@@ -212,8 +251,8 @@ Difficulty 2), with the Attribute + Department and ship assist the Rule Hints su
   need it are: *Weapons: Arm* needs Weapons and *Prepare for Warp* needs Engines (GM
   override possible). Lowering or raising Shields always works.
 * **Other Tasks** takes its base Difficulty from the *Other Task base Difficulty*
-  box. You set its Attribute and Department in the Action Resolver.
-* The **Rule Hints** box always shows the Difficulty in the form
+  box. You set its Attribute and Department in Roll & Resolve.
+* The **Rule Hint Card** always shows the Difficulty in the form
   `Base 2 + 1 (Failing breach: Engines) + 1 (GM Modifier) = Total Difficulty 4`. It
   also shows the suggested Attribute + Department and ship assist, plus warnings:
   Restore required, subsystem offline, and Threat spends.
@@ -230,7 +269,7 @@ the dropdown; *Skip* leaves the system's condition unchanged.
 | 1–4 | **Damaged** | Mostly functional. A reminder suggests the GM spend Threat on a complication |
 | 5–8 | **Malfunctioning** | Before any task or Major Action that uses the subsystem, a **Restore** minor action is needed that turn. The app offers to take it (or a GM override). A Restore lasts until the ship's turn ends |
 | 9–12 | **Primary Offline** (switching to backup) | +1 Difficulty to every task using the subsystem, added automatically |
-| 13–16 | **Failing** | +1 Difficulty to every task using the subsystem, added automatically. **Spend 1 Threat → Set Offline** appears below the warning box when the acting ship's chosen action uses the Failing subsystem; the Breach Tracker's **→ Offline** button does the same for the target |
+| 13–16 | **Failing** | +1 Difficulty to every task using the subsystem, added automatically. **Spend 1 Threat → Set Offline** appears below the warning box when the acting ship's chosen action uses the Failing subsystem; the Breach Manager's **→ Offline** button does the same for the target |
 | 17–20 | **Offline** | Actions using the subsystem are blocked (GM override only) |
 
 * A task "uses" a subsystem when it's the action's station system or its
@@ -240,9 +279,11 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   downgrade it, though the GM can set any condition in the tracker's dropdown.
 * The condition clears when the system's last breach is patched, by Damage Control,
   Rugged Design's second patch, the tracker's **−** button or Full Repair.
-* Conditions show in the Breach Tracker, Active Ship Status, the alerts panel (for
-  example "Engines: Malfunctioning" or "Sensors: Primary Offline (+1 Diff)") and the
-  red warning box in the middle panel.
+* Conditions show in the Breach Manager, Target Quick Status, the Fleet table's
+  status column, the reminders under the Rule Hint Card (for example "Engines:
+  Malfunctioning" or "Sensors: Primary Offline (+1 Diff)") and the red warning box
+  in Step 2. **Roll Nature of Breach (d20)** in Step 3 rolls it again for any breached
+  target system.
 
 ## Other rules automation
 
@@ -267,8 +308,8 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   * Losing Power for Regain Power
   * Jammed for Comms / Sensors tasks
   * Devastating breaches for Damage Control
-* **Opposed tasks** (the target used Evasive Action or Defensive Fire). The Rule Hints
-  show `Defender's successes ? + 1 (GM Modifier) = Total Difficulty ?` until the
+* **Opposed tasks** (the target used Evasive Action or Defensive Fire). The Rule Hint Card
+  shows `Defender's successes ? + 1 (GM Modifier) = Total Difficulty ?` until the
   defender has rolled. The defender rolls first, Daring + Conn or Daring + Security
   with the ship assisting. Their
   successes **replace the base Difficulty**; every other modifier still applies, and a
@@ -284,7 +325,7 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   player ship fires it, or 3 for a salvo; NPC ships spend Threat instead. When a
   player ship doesn't have enough Momentum, the shortfall is added to Threat.
 * **Shields:** lowered shields count as 0. The previous value comes back when the
-  shields are raised with Prepare or the Target Status toggle.
+  shields are raised with Prepare or the Target Quick Status toggle.
 * **Damage:** Resistance (with talent bonuses) is deducted unless the attack is
   Piercing. If Shields drop below 50% or below 25%, the Shaken Resolver opens. In it
   you can pick a result from the Minor Damage table or click **Auto-Roll d20**; a

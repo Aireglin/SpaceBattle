@@ -1836,56 +1836,53 @@ class BreachNatureDialog(tk.Toplevel):
         return dlg.result
 
 
-class WeaponDialog(tk.Toplevel):
-    """Add / edit a weapon, with the Core Rulebook Auto-Calculator (pp. 228-230)."""
+class WeaponForm(ttk.Frame):
+    """Weapon fields with the Core Rulebook Auto-Calculator (pp. 228-230). Embedded in the
+    Ship Creator tab; `load()` shows a weapon, `get_weapon()` returns the edited one."""
 
     CUSTOM = "(custom)"
 
-    def __init__(self, parent, weapon=None, scale=None, weapons_rating=None):
-        super().__init__(parent)
-        self.title("Weapon" if weapon is None else f"Edit Weapon - {weapon.name}")
-        self.resizable(False, False)
-        self.result = None
+    def __init__(self, master, wraplength=470):
+        super().__init__(master)
         self._filling = False
+        self._loading = False
         self._std_damage = None          # standard damage for the last calculator inputs
-        w = weapon or Weapon()
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
-        self.name_var = tk.StringVar(value=w.name)
-        self.type_var = tk.StringVar(value=w.wtype)
-        self.dmg_var = tk.IntVar(value=w.damage)
-        self.range_var = tk.StringVar(value=w.range)
-        ttk.Label(frm, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.name_var, width=28).grid(row=0, column=1, columnspan=3,
+        self._ship_scale, self._ship_weapons = 4, 8
+        self.linked = False
+        self.name_var = tk.StringVar()
+        self.type_var = tk.StringVar(value="Energy")
+        self.dmg_var = tk.IntVar(value=4)
+        self.range_var = tk.StringVar(value="Medium")
+        top = ttk.Frame(self)
+        top.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(top, textvariable=self.name_var, width=30).grid(row=0, column=1, columnspan=5,
                                                                   sticky="ew", pady=2)
-        ttk.Label(frm, text="Type").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(frm, textvariable=self.type_var, values=WEAPON_TYPES, state="readonly",
-                     width=10).grid(row=1, column=1, sticky="w", pady=2)
-        ttk.Label(frm, text="Damage").grid(row=1, column=2, sticky="e", padx=(8, 2))
-        ttk.Spinbox(frm, from_=0, to=30, textvariable=self.dmg_var, width=5).grid(
+        ttk.Label(top, text="Type").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(top, textvariable=self.type_var, values=WEAPON_TYPES, state="readonly",
+                     width=9).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(top, text="Damage").grid(row=1, column=2, sticky="e", padx=(8, 2))
+        ttk.Spinbox(top, from_=0, to=30, textvariable=self.dmg_var, width=5).grid(
             row=1, column=3, sticky="w")
-        ttk.Label(frm, text="Range").grid(row=2, column=0, sticky="w")
-        ttk.Combobox(frm, textvariable=self.range_var, values=WEAPON_RANGES, state="readonly",
-                     width=10).grid(row=2, column=1, sticky="w", pady=2)
-        self._build_calculator(frm, w, scale, weapons_rating, is_new=weapon is None)
-        qbox = ttk.LabelFrame(frm, text="Qualities (editable)", padding=6)
-        qbox.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Label(top, text="Range").grid(row=1, column=4, sticky="e", padx=(8, 2))
+        ttk.Combobox(top, textvariable=self.range_var, values=WEAPON_RANGES, state="readonly",
+                     width=8).grid(row=1, column=5, sticky="w", pady=2)
+        self._build_calculator(wraplength)
+        qbox = ttk.LabelFrame(self, text="Qualities (editable)", padding=6)
+        qbox.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         self.q_vars = {}
-        for i, (q, (has_x, desc)) in enumerate(WEAPON_QUALITIES.items()):
-            row, col = divmod(i, 2)
+        for i, (q, (has_x, _desc)) in enumerate(WEAPON_QUALITIES.items()):
+            row, col = divmod(i, 3)
             cell = ttk.Frame(qbox)
-            cell.grid(row=row, column=col, sticky="w", padx=4, pady=1)
-            on = tk.BooleanVar(value=w.has(q))
+            cell.grid(row=row, column=col, sticky="w", padx=3, pady=1)
+            on = tk.BooleanVar(value=False)
             ttk.Checkbutton(cell, text=q + (" X" if has_x else ""), variable=on).pack(side="left")
             xv = None
             if has_x:
-                xv = tk.IntVar(value=max(1, to_int(w.qualities.get(q, 1), 1)))
+                xv = tk.IntVar(value=1)
                 ttk.Spinbox(cell, from_=1, to=9, textvariable=xv, width=3).pack(side="left", padx=2)
             self.q_vars[q] = (on, xv)
-        btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+        self.columnconfigure(0, weight=1)
 
         self.type_var.trace_add("write", lambda *_a: self._on_type_change())
         for var in (self.calc_scale_var, self.calc_weapons_var, self.bonus_var):
@@ -1895,39 +1892,30 @@ class WeaponDialog(tk.Toplevel):
             watched += [on] + ([xv] if xv is not None else [])
         for var in watched:
             var.trace_add("write", lambda *_a: self._refresh_calc())
-        self._show_selectors()
-        self._last_key = self._selection_key()
-        self._refresh_calc()
-        make_modal(self, parent)
+        self.load(None)
 
     # ------------------------------------------------------------ calculator
-    def _build_calculator(self, frm, w, scale, weapons_rating, is_new=False):
-        calc = ttk.LabelFrame(frm, text="Auto-Calculate Weapon Stats (Core Rulebook pp. 228-230)",
+    def _build_calculator(self, wraplength):
+        calc = ttk.LabelFrame(self, text="Auto-Calculate Weapon Stats (Core Rulebook pp. 228-230)",
                               padding=6)
-        calc.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        # A saved profile links the weapon to the calculator. A profile guessed from the
-        # name only pre-selects the dropdowns; it links once the GM picks a type or
-        # clicks Auto-Populate. A new weapon starts as a custom weapon.
-        saved = bool(w.energy_type or w.delivery or w.torpedo_type)
-        self.linked = saved
-        etype, delivery, ttype = ("", "", "") if is_new else weapon_profile(w)
-        self.etype_var = tk.StringVar(value=etype or self.CUSTOM)
-        self.delivery_var = tk.StringVar(value=delivery or self.CUSTOM)
-        self.ttype_var = tk.StringVar(value=ttype or self.CUSTOM)
+        calc.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.etype_var = tk.StringVar(value=self.CUSTOM)
+        self.delivery_var = tk.StringVar(value=self.CUSTOM)
+        self.ttype_var = tk.StringVar(value=self.CUSTOM)
         self.energy_row = ttk.Frame(calc)
-        ttk.Label(self.energy_row, text="Energy Type").pack(side="left")
+        ttk.Label(self.energy_row, text="Energy Type").grid(row=0, column=0, sticky="w")
         ecb = ttk.Combobox(self.energy_row, textvariable=self.etype_var, state="readonly",
                            values=[self.CUSTOM] + list(ENERGY_TYPES), width=22)
-        ecb.pack(side="left", padx=(4, 8))
-        ttk.Label(self.energy_row, text="+ Delivery Method").pack(side="left")
+        ecb.grid(row=0, column=1, sticky="w", padx=(6, 0), pady=1)
+        ttk.Label(self.energy_row, text="+ Delivery Method").grid(row=1, column=0, sticky="w")
         dcb = ttk.Combobox(self.energy_row, textvariable=self.delivery_var, state="readonly",
-                           values=[self.CUSTOM] + list(ENERGY_DELIVERY_METHODS), width=13)
-        dcb.pack(side="left", padx=(4, 0))
+                           values=[self.CUSTOM] + list(ENERGY_DELIVERY_METHODS), width=22)
+        dcb.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=1)
         self.torp_row = ttk.Frame(calc)
-        ttk.Label(self.torp_row, text="Torpedo Type").pack(side="left")
+        ttk.Label(self.torp_row, text="Torpedo Type").grid(row=0, column=0, sticky="w")
         tcb = ttk.Combobox(self.torp_row, textvariable=self.ttype_var, state="readonly",
-                           values=[self.CUSTOM] + list(TORPEDO_TYPES), width=14)
-        tcb.pack(side="left", padx=(4, 0))
+                           values=[self.CUSTOM] + list(TORPEDO_TYPES), width=22)
+        tcb.grid(row=0, column=1, sticky="w", padx=(6, 0), pady=1)
         for cb in (ecb, dcb, tcb):
             cb.bind("<<ComboboxSelected>>", lambda _e: self._on_selection())
         self.energy_row.grid(row=0, column=0, sticky="w")
@@ -1935,8 +1923,6 @@ class WeaponDialog(tk.Toplevel):
 
         ship_row = ttk.Frame(calc)
         ship_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self._ship_scale = clamp(to_int(scale, 4), 1, 10)
-        self._ship_weapons = clamp(to_int(weapons_rating, 8), 1, 16)
         self.calc_scale_var = tk.IntVar(value=self._ship_scale)
         self.calc_weapons_var = tk.IntVar(value=self._ship_weapons)
         ttk.Label(ship_row, text="Ship Scale").pack(side="left")
@@ -1945,24 +1931,67 @@ class WeaponDialog(tk.Toplevel):
         ttk.Label(ship_row, text="Weapons").pack(side="left")
         ttk.Spinbox(ship_row, from_=1, to=16, textvariable=self.calc_weapons_var,
                     width=4).pack(side="left", padx=(4, 8))
-        self.bonus_lbl = ttk.Label(ship_row, text="", style="Bold.TLabel")
-        self.bonus_lbl.pack(side="left")
-        self.bonus_var = tk.BooleanVar(value=w.include_bonus)
-        ttk.Checkbutton(calc, text="Add the Weapons System Damage Bonus to the Damage rating",
-                        variable=self.bonus_var).grid(row=2, column=0, sticky="w")
-        self.calc_lbl = ttk.Label(calc, text="", style="Bold.TLabel", wraplength=470)
-        self.calc_lbl.grid(row=3, column=0, sticky="w", pady=(4, 0))
-        self.calc_q_lbl = ttk.Label(calc, text="", wraplength=470)
-        self.calc_q_lbl.grid(row=4, column=0, sticky="w")
+        self.bonus_lbl = ttk.Label(calc, text="", style="Bold.TLabel")
+        self.bonus_lbl.grid(row=2, column=0, sticky="w")
+        self.bonus_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(calc, text="Add this bonus to the Damage rating",
+                        variable=self.bonus_var).grid(row=3, column=0, sticky="w")
+        self.calc_lbl = ttk.Label(calc, text="", style="Bold.TLabel", wraplength=wraplength)
+        self.calc_lbl.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self.calc_q_lbl = ttk.Label(calc, text="", wraplength=wraplength)
+        self.calc_q_lbl.grid(row=5, column=0, sticky="w")
         act = ttk.Frame(calc)
-        act.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        act.grid(row=6, column=0, sticky="ew", pady=(4, 0))
         ttk.Button(act, text="Auto-Populate", style="Accent.TButton",
                    command=self.auto_populate).pack(side="left")
         self.autofill_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(act, text="Auto-fill when a selection changes",
                         variable=self.autofill_var).pack(side="left", padx=(8, 0))
-        self.calc_status_lbl = ttk.Label(calc, text="", wraplength=470)
-        self.calc_status_lbl.grid(row=6, column=0, sticky="w", pady=(2, 0))
+        self.calc_status_lbl = ttk.Label(calc, text="", wraplength=wraplength)
+        self.calc_status_lbl.grid(row=7, column=0, sticky="w", pady=(2, 0))
+
+    def load(self, weapon=None, scale=None, weapons_rating=None):
+        """Show `weapon` (None = a new, custom weapon) for the given ship values."""
+        w = weapon or Weapon(name="")
+        if scale is not None:
+            self._ship_scale = clamp(to_int(scale, 4), 1, 10)
+        if weapons_rating is not None:
+            self._ship_weapons = clamp(to_int(weapons_rating, 8), 1, 16)
+        # A saved profile links the weapon to the calculator. A profile guessed from the
+        # name only pre-selects the dropdowns; it links once the GM picks a type or
+        # clicks Auto-Populate. A new weapon starts as a custom weapon.
+        self.linked = bool(w.energy_type or w.delivery or w.torpedo_type)
+        etype, delivery, ttype = ("", "", "") if weapon is None else weapon_profile(w)
+        self._loading = True
+        try:
+            self.name_var.set(w.name)
+            self.type_var.set(w.wtype)
+            self.dmg_var.set(w.damage)
+            self.range_var.set(w.range)
+            self.etype_var.set(etype or self.CUSTOM)
+            self.delivery_var.set(delivery or self.CUSTOM)
+            self.ttype_var.set(ttype or self.CUSTOM)
+            self.calc_scale_var.set(self._ship_scale)
+            self.calc_weapons_var.set(self._ship_weapons)
+            self.bonus_var.set(w.include_bonus)
+            for q, (on, xv) in self.q_vars.items():
+                on.set(w.has(q))
+                if xv is not None:
+                    xv.set(max(1, to_int(w.qualities.get(q, 1), 1)))
+        finally:
+            self._loading = False
+        self._show_selectors()
+        self._last_key = self._selection_key()
+        self._refresh_calc()
+
+    def set_ship_values(self, scale, weapons_rating):
+        """The ship's Scale / Weapons rating changed in the creator: follow it."""
+        self._ship_scale = clamp(to_int(scale, 4), 1, 10)
+        self._ship_weapons = clamp(to_int(weapons_rating, 8), 1, 16)
+        if int_var_value(self.calc_scale_var, -1) != self._ship_scale:
+            self.calc_scale_var.set(self._ship_scale)
+        if int_var_value(self.calc_weapons_var, -1) != self._ship_weapons:
+            self.calc_weapons_var.set(self._ship_weapons)
 
     def _selection(self):
         def val(var):
@@ -1998,6 +2027,8 @@ class WeaponDialog(tk.Toplevel):
         return (self.type_var.get(),) + self._selection()
 
     def _on_type_change(self):
+        if self._loading:
+            return
         self._show_selectors()
         if self.linked:
             self._on_selection()
@@ -2018,6 +2049,8 @@ class WeaponDialog(tk.Toplevel):
     def _on_ship_values_change(self):
         """Scale / Weapons / bonus box changed: the damage follows the standard only while
         it still equals the previous standard (a hand-set damage is kept)."""
+        if self._loading:
+            return
         if not self._calc_inputs_valid():
             self._refresh_calc()
             return
@@ -2059,11 +2092,12 @@ class WeaponDialog(tk.Toplevel):
         return quals
 
     def _refresh_calc(self):
-        if self._filling or not hasattr(self, "q_vars"):
+        if self._filling or self._loading or not hasattr(self, "q_vars"):
             return
-        rating = int_var_value(self.calc_weapons_var, 8)
+        rating = int_var_value(self.calc_weapons_var, self._ship_weapons)
         self.bonus_lbl.configure(
-            text=f"\u2192 Weapons System Damage Bonus +{weapons_damage_bonus(rating)}")
+            text=f"Weapons System Damage Bonus: +{weapons_damage_bonus(rating)} "
+                 f"(Weapons {rating})")
         std, parts = self.standard()
         self._std_damage = std.damage if std is not None else None
         if std is None:
@@ -2094,27 +2128,22 @@ class WeaponDialog(tk.Toplevel):
                                            style="Good.TLabel")
 
     # ------------------------------------------------------------ result
-    def _ok(self):
+    def get_weapon(self):
+        """The weapon described by the form, or None (after an error message)."""
         name = self.name_var.get().strip()
         if not name:
-            messagebox.showerror("Weapon", "The weapon needs a name.", parent=self)
-            return
+            messagebox.showerror("Weapon", "The weapon needs a name (or pick a type in the "
+                                           "Auto-Calculator).", parent=self.winfo_toplevel())
+            return None
         wtype = self.type_var.get()
         etype, delivery, ttype = self._selection() if self.linked else ("", "", "")
         energy = wtype == "Energy"
-        self.result = Weapon(name, wtype, max(0, int_var_value(self.dmg_var, 0)),
-                             self.range_var.get(), self.current_qualities(),
-                             energy_type=etype if energy else "",
-                             delivery=delivery if energy else "",
-                             torpedo_type=ttype if not energy else "",
-                             include_bonus=self.bonus_var.get())
-        self.destroy()
-
-    @classmethod
-    def ask(cls, parent, weapon=None, scale=None, weapons_rating=None):
-        dlg = cls(parent, weapon, scale, weapons_rating)
-        parent.wait_window(dlg)
-        return dlg.result
+        return Weapon(name, wtype, max(0, int_var_value(self.dmg_var, 0)),
+                      self.range_var.get(), self.current_qualities(),
+                      energy_type=etype if energy else "",
+                      delivery=delivery if energy else "",
+                      torpedo_type=ttype if not energy else "",
+                      include_bonus=self.bonus_var.get())
 
 
 class TalentPicker(ttk.Frame):
@@ -2183,6 +2212,20 @@ class TalentPicker(ttk.Frame):
     def selected(self) -> list:
         return [self.names[i] for i in self.lb.curselection()]
 
+    def set_selected(self, names, notify=False):
+        """Select exactly `names` (unknown ones are added as custom entries)."""
+        for name in names:
+            if name not in self.names:
+                self.names.append(name)
+                self.lb.insert("end", self._label(name))
+        self.lb.selection_clear(0, "end")
+        for name in names:
+            self.lb.selection_set(self.names.index(name))
+        self._prev = set(self.lb.curselection())
+        self.info.configure(text="Click a talent to see its rule.")
+        if notify and self.on_change:
+            self.on_change()
+
     def clear(self):
         self.lb.selection_clear(0, "end")
         self._prev = set()
@@ -2191,39 +2234,63 @@ class TalentPicker(ttk.Frame):
             self.on_change()
 
 
-class ShipEditor(tk.Toplevel):
-    """Custom Ship creator / editor (systems, departments, weapons, talents, crew quality)."""
+class ShipCreator:
+    """Ship Creator (Ship Creator & Generator tab): the ship's stats, talents and notes in
+    one column, its weapons with the Auto-Calculator form in another.
 
-    def __init__(self, parent, ship, existing_names, title):
-        super().__init__(parent)
-        self.title(title)
-        self.result = None
-        self.is_new = ship is None
-        self.src = copy.deepcopy(ship) if ship else Ship(name="New Ship")
-        self.existing = set(existing_names) - ({ship.name} if ship else set())
-        self.weapons = [copy.deepcopy(w) for w in self.src.weapons]
-        s = self.src
+    It edits a working copy. `on_save(as_new)` asks the app to write it into the roster;
+    the app calls `apply_to()` on the live roster ship (so combat state such as damage
+    taken while the ship was being edited is kept) or on a new ship."""
 
-        frm = ttk.Frame(self, padding=10)
-        frm.pack(fill="both", expand=True)
-        for col in range(3):
-            frm.columnconfigure(col, weight=1)
+    def __init__(self, fields_parent, weapons_parent, on_save, on_dirty=None, confirm=None):
+        self.on_save = on_save
+        self.on_dirty = on_dirty
+        self.confirm = confirm or (lambda title, msg: messagebox.askyesno(title, msg))
+        self.editing_name = None         # roster ship being edited, None = a new ship
+        self.weapons = []
+        self.dirty = False
+        self._loading = False
+        self._build_fields(fields_parent)
+        self._build_weapons(weapons_parent)
+        self.new_blank()
 
-        gen = ttk.LabelFrame(frm, text="General", padding=6)
-        gen.grid(row=0, column=0, columnspan=3, sticky="ew")
-        self.name_var = tk.StringVar(value=s.name)
-        self.class_var = tk.StringVar(value=s.ship_class)
-        self.side_var = tk.StringVar(value=s.side)
-        self.scale_var = tk.IntVar(value=s.scale)
-        self.quality_var = tk.StringVar(value=s.crew_quality)
-        self.shields_var = tk.IntVar(value=s.base_shields)
-        self.res_var = tk.IntVar(value=s.base_resistance)
-        self.tractor_var = tk.IntVar(value=s.tractor_beam)
+    # ------------------------------------------------------------ layout
+    def _build_fields(self, body):
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        head = ttk.Frame(body)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.mode_lbl = ttk.Label(head, text="", style="Header.TLabel")
+        self.mode_lbl.pack(side="left")
+        self.dirty_lbl = ttk.Label(head, text="", style="Alert.TLabel")
+        self.dirty_lbl.pack(side="left", padx=8)
+
+        btns = ttk.Frame(body)
+        btns.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.save_btn = ttk.Button(btns, text="Save to Roster", style="Accent.TButton",
+                                   command=lambda: self.on_save(False))
+        self.save_btn.pack(side="left")
+        self.save_new_btn = ttk.Button(btns, text="Save as New Ship",
+                                       command=lambda: self.on_save(True))
+        self.save_new_btn.pack(side="left", padx=4)
+        ttk.Button(btns, text="New Blank Ship", command=self._new_blank_clicked).pack(
+            side="right")
+
+        gen = ttk.LabelFrame(body, text="General", padding=6)
+        gen.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.name_var = tk.StringVar()
+        self.class_var = tk.StringVar()
+        self.side_var = tk.StringVar(value="NPC")
+        self.scale_var = tk.IntVar(value=4)
+        self.quality_var = tk.StringVar(value=DEFAULT_CREW_QUALITY)
+        self.shields_var = tk.IntVar(value=0)
+        self.res_var = tk.IntVar(value=0)
+        self.tractor_var = tk.IntVar(value=0)
         ttk.Label(gen, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(gen, textvariable=self.name_var, width=30).grid(row=0, column=1, columnspan=3,
+        ttk.Entry(gen, textvariable=self.name_var, width=26).grid(row=0, column=1, columnspan=4,
                                                                   sticky="ew", pady=2)
-        ttk.Label(gen, text="Class / Notes").grid(row=1, column=0, sticky="w")
-        ttk.Entry(gen, textvariable=self.class_var, width=30).grid(row=1, column=1, columnspan=3,
+        ttk.Label(gen, text="Spaceframe / Class").grid(row=1, column=0, sticky="w")
+        ttk.Entry(gen, textvariable=self.class_var, width=26).grid(row=1, column=1, columnspan=4,
                                                                    sticky="ew", pady=2)
         ttk.Label(gen, text="Side").grid(row=2, column=0, sticky="w")
         ttk.Combobox(gen, textvariable=self.side_var, values=SIDES, state="readonly",
@@ -2235,97 +2302,191 @@ class ShipEditor(tk.Toplevel):
         qcb = ttk.Combobox(gen, textvariable=self.quality_var, values=list(CREW_QUALITY),
                            state="readonly", width=12)
         qcb.grid(row=3, column=1, sticky="w", pady=2)
-        self.quality_info = ttk.Label(gen, text="")
+        self.quality_info = ttk.Label(gen, text="", style="Info.TLabel")
         self.quality_info.grid(row=3, column=2, columnspan=3, sticky="w", padx=(8, 0))
-        qcb.bind("<<ComboboxSelected>>", lambda _e: self._update_quality_info())
         ttk.Label(gen, text="Shields (base)").grid(row=4, column=0, sticky="w")
         ttk.Spinbox(gen, from_=0, to=60, textvariable=self.shields_var, width=5).grid(
             row=4, column=1, sticky="w")
         ttk.Label(gen, text="Resistance (base)").grid(row=4, column=2, sticky="e", padx=(8, 2))
         ttk.Spinbox(gen, from_=0, to=20, textvariable=self.res_var, width=5).grid(
             row=4, column=3, sticky="w")
-        self.effective_lbl = ttk.Label(gen, text="", style="Bold.TLabel")
-        self.effective_lbl.grid(row=4, column=4, sticky="w", padx=(10, 0))
-        ttk.Label(gen, text="Tractor Beam Strength").grid(row=5, column=0, sticky="w")
+        ttk.Label(gen, text="Tractor Beam").grid(row=5, column=0, sticky="w")
         ttk.Spinbox(gen, from_=0, to=15, textvariable=self.tractor_var, width=5).grid(
             row=5, column=1, sticky="w", pady=2)
         ttk.Label(gen, text="(0 = Scale - 1)", style="Info.TLabel").grid(row=5, column=2,
                                                                          columnspan=2, sticky="w")
-        ttk.Button(gen, text="Auto-calc base (Shields = Structure + Security + Scale, "
-                             "Resistance = Scale)",
-                   command=self._auto_calc).grid(row=6, column=0, columnspan=5, sticky="w",
+        self.effective_lbl = ttk.Label(gen, text="", style="Bold.TLabel", wraplength=420)
+        self.effective_lbl.grid(row=6, column=0, columnspan=5, sticky="w", pady=(2, 0))
+        ttk.Button(gen, text="Auto-calc base Shields & Resistance",
+                   command=self._auto_calc).grid(row=7, column=0, columnspan=5, sticky="w",
                                                  pady=(4, 0))
+        ttk.Label(gen, text="Shields = Structure + Security + Scale; Resistance = Scale",
+                  style="Info.TLabel").grid(row=8, column=0, columnspan=5, sticky="w")
         gen.columnconfigure(4, weight=1)
 
-        sysf = ttk.LabelFrame(frm, text="Systems", padding=6)
-        sysf.grid(row=1, column=0, sticky="nsew", pady=6, padx=(0, 3))
+        sysf = ttk.LabelFrame(body, text="Systems", padding=6)
+        sysf.grid(row=3, column=0, sticky="nsew", pady=6, padx=(0, 3))
         self.sys_vars = {}
         for i, name in enumerate(SYSTEMS):
-            self.sys_vars[name] = tk.IntVar(value=s.systems.get(name, 8))
+            self.sys_vars[name] = tk.IntVar(value=8)
             ttk.Label(sysf, text=name).grid(row=i, column=0, sticky="w")
             ttk.Spinbox(sysf, from_=1, to=16, textvariable=self.sys_vars[name], width=5).grid(
-                row=i, column=1, sticky="w", pady=1)
-        deptf = ttk.LabelFrame(frm, text="Departments", padding=6)
-        deptf.grid(row=1, column=1, sticky="nsew", pady=6, padx=3)
+                row=i, column=1, sticky="w", pady=1, padx=(6, 0))
+        deptf = ttk.LabelFrame(body, text="Departments", padding=6)
+        deptf.grid(row=3, column=1, sticky="nsew", pady=6, padx=(3, 0))
         self.dept_vars = {}
         for i, name in enumerate(DEPARTMENTS):
-            self.dept_vars[name] = tk.IntVar(value=s.departments.get(name, 2))
+            self.dept_vars[name] = tk.IntVar(value=2)
             ttk.Label(deptf, text=name).grid(row=i, column=0, sticky="w")
             ttk.Spinbox(deptf, from_=0, to=5, textvariable=self.dept_vars[name], width=5).grid(
-                row=i, column=1, sticky="w", pady=1)
-        tf = ttk.LabelFrame(frm, text="Starship Talents & Special Rules (multi-select)",
+                row=i, column=1, sticky="w", pady=1, padx=(6, 0))
+
+        tf = ttk.LabelFrame(body, text="Starship Talents & Special Rules (multi-select)",
                             padding=6)
-        tf.grid(row=1, column=2, rowspan=2, sticky="nsew", pady=6, padx=(3, 0))
-        self.talents = TalentPicker(tf, selected=s.talents, height=12,
-                                    on_change=self._update_effective)
+        tf.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        self.talents = TalentPicker(tf, height=8, on_change=self._on_talents_change)
         self.talents.pack(fill="both", expand=True)
 
-        wf = ttk.LabelFrame(frm, text="Weapons", padding=6)
-        wf.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        nf = ttk.LabelFrame(body, text="Notes", padding=6)
+        nf.grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+        self.notes = tk.Text(nf, height=3, width=50, wrap="word")
+        self.notes.pack(fill="both", expand=True)
+        self.notes.bind("<<Modified>>", self._on_notes_modified)
+
+
+        watched = [self.name_var, self.class_var, self.side_var, self.scale_var,
+                   self.quality_var, self.shields_var, self.res_var, self.tractor_var]
+        watched += list(self.sys_vars.values()) + list(self.dept_vars.values())
+        for var in watched:
+            var.trace_add("write", lambda *_a: self._on_field_change())
+        for var in (self.scale_var, self.sys_vars["Weapons"]):
+            var.trace_add("write", lambda *_a: self._sync_weapon_form())
+
+    def _build_weapons(self, body):
+        body.columnconfigure(0, weight=1)
+        wf = ttk.LabelFrame(body, text="Weapons", padding=6)
+        wf.grid(row=0, column=0, sticky="ew")
+        wf.columnconfigure(0, weight=1)
         cols = ("type", "damage", "range", "qualities")
         self.tree = ttk.Treeview(wf, columns=cols, height=5, selectmode="browse")
         self.tree.heading("#0", text="Name")
         self.tree.column("#0", width=140)
-        for c, w in zip(cols, (65, 65, 65, 170)):
+        for c, w in zip(cols, (60, 58, 58, 170)):
             self.tree.heading(c, text=c.title())
             self.tree.column(c, width=w, anchor="w")
-        self.tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
-        self.tree.bind("<Double-1>", lambda _e: self._edit_weapon())
-        ttk.Button(wf, text="Add Weapon...", command=self._add_weapon).grid(row=1, column=0,
-                                                                            sticky="w", pady=4)
-        ttk.Button(wf, text="Edit...", command=self._edit_weapon).grid(row=1, column=1, sticky="w")
-        ttk.Button(wf, text="Remove", command=self._remove_weapon).grid(row=1, column=2,
-                                                                        sticky="w")
-        ttk.Button(wf, text="Recalc Damage", command=self._recalc_weapons).grid(
-            row=1, column=3, sticky="e")
-        wf.columnconfigure(3, weight=1)
+        self.tree.grid(row=0, column=0, sticky="ew")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_weapon_select())
+        wbf = ttk.Frame(wf)
+        wbf.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(wbf, text="Remove Selected", command=self.remove_weapon).pack(side="left")
+        ttk.Button(wbf, text="Recalc Damage", command=self.recalc_weapons).pack(side="left",
+                                                                                padx=4)
+        ttk.Label(wf, text="Select a weapon to edit it in the form below.",
+                  style="Info.TLabel").grid(row=2, column=0, sticky="w")
 
-        nf = ttk.LabelFrame(frm, text="Notes", padding=6)
-        nf.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
-        self.notes = tk.Text(nf, height=3, width=60, wrap="word")
-        self.notes.pack(fill="both", expand=True)
-        self.notes.insert("1.0", s.notes)
+        ff = ttk.LabelFrame(body, text="Weapon Form", padding=6)
+        ff.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ff.columnconfigure(0, weight=1)
+        self.wform_lbl = ttk.Label(ff, text="", style="Bold.TLabel")
+        self.wform_lbl.grid(row=0, column=0, sticky="w")
+        self.wform = WeaponForm(ff, wraplength=420)
+        self.wform.grid(row=1, column=0, sticky="ew")
+        fbf = ttk.Frame(ff)
+        fbf.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(fbf, text="Add as New Weapon", style="Accent.TButton",
+                   command=self.add_weapon).pack(side="left")
+        self.update_weapon_btn = ttk.Button(fbf, text="Update Selected Weapon",
+                                            command=self.update_weapon)
+        self.update_weapon_btn.pack(side="left", padx=4)
+        ttk.Button(fbf, text="Clear Form", command=self.clear_weapon_form).pack(side="left")
 
-        btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="ew")
-        ttk.Button(btns, text="Save Ship", style="Accent.TButton",
-                   command=self._save).pack(side="right")
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+    # ------------------------------------------------------------ state
+    def _set_dirty(self, dirty):
+        self.dirty = dirty
+        self.dirty_lbl.configure(text="\u25cf unsaved edits" if dirty else "")
+        if self.on_dirty:
+            self.on_dirty(dirty)
 
-        for var in (self.shields_var, self.res_var, self.scale_var, self.tractor_var):
-            var.trace_add("write", lambda *_a: self._update_effective())
-        self._update_quality_info()
+    def _on_field_change(self):
+        if self._loading:
+            return
         self._update_effective()
+        self._update_quality_info()
+        self._set_dirty(True)
+
+    def _on_talents_change(self):
+        self._update_effective()
+        if not self._loading:
+            self._set_dirty(True)
+
+    def _on_notes_modified(self, _event=None):
+        if self.notes.edit_modified():
+            self.notes.edit_modified(False)
+            if not self._loading:
+                self._set_dirty(True)
+
+    def _sync_weapon_form(self):
+        if self._loading:
+            return
+        ctx = self.weapon_context()
+        self.wform.set_ship_values(ctx["scale"], ctx["weapons_rating"])
+
+    def load_ship(self, ship, as_new=False):
+        """Fill the form from `ship`. as_new: save it as a new roster ship (e.g. a
+        generated NPC to tweak); otherwise it edits the roster ship of that name."""
+        self._loading = True
+        try:
+            self.editing_name = None if as_new else ship.name
+            self.name_var.set(ship.name)
+            self.class_var.set(ship.ship_class)
+            self.side_var.set(ship.side if ship.side in SIDES else "NPC")
+            self.scale_var.set(ship.scale)
+            self.quality_var.set(ship.crew_quality if ship.crew_quality in CREW_QUALITY
+                                 else DEFAULT_CREW_QUALITY)
+            self.shields_var.set(ship.base_shields)
+            self.res_var.set(ship.base_resistance)
+            self.tractor_var.set(ship.tractor_beam)
+            for name, var in self.sys_vars.items():
+                var.set(ship.systems.get(name, 8))
+            for name, var in self.dept_vars.items():
+                var.set(ship.departments.get(name, 2))
+            self.talents.set_selected(list(ship.talents))
+            self.notes.delete("1.0", "end")
+            self.notes.insert("1.0", ship.notes)
+            self.notes.edit_modified(False)
+            self.weapons = [copy.deepcopy(w) for w in ship.weapons]
+        finally:
+            self._loading = False
+        self.mode_lbl.configure(text=f"Editing: {ship.name}" if self.editing_name
+                                else "New ship (not in the roster yet)")
+        self.save_btn.configure(text="Save Changes" if self.editing_name else "Save to Roster")
+        self._update_effective()
+        self._update_quality_info()
         self._refresh_tree()
-        make_modal(self, parent)
+        self.clear_weapon_form()
+        self._set_dirty(as_new)
+
+    def _new_blank_clicked(self):
+        if not self.dirty or self.confirm("Ship Creator", "Discard the unsaved edits?"):
+            self.new_blank()
+
+    def new_blank(self):
+        self.load_ship(Ship(name="New Ship", base_shields=10, shields=10, base_resistance=4),
+                       as_new=True)
+        self._set_dirty(False)
+
+    def mark_saved(self, ship):
+        self.editing_name = ship.name
+        self.mode_lbl.configure(text=f"Editing: {ship.name}")
+        self.save_btn.configure(text="Save Changes")
+        self._set_dirty(False)
 
     def _preview(self) -> Ship:
-        probe = Ship(name="preview", scale=clamp(int_var_value(self.scale_var, 4), 1, 10),
-                     base_shields=max(0, int_var_value(self.shields_var, 0)),
-                     base_resistance=max(0, int_var_value(self.res_var, 0)),
-                     tractor_beam=max(0, int_var_value(self.tractor_var, 0)),
-                     talents=self.talents.selected())
-        return probe
+        return Ship(name="preview", scale=clamp(int_var_value(self.scale_var, 4), 1, 10),
+                    base_shields=max(0, int_var_value(self.shields_var, 0)),
+                    base_resistance=max(0, int_var_value(self.res_var, 0)),
+                    tractor_beam=max(0, int_var_value(self.tractor_var, 0)),
+                    talents=self.talents.selected())
 
     def _update_effective(self):
         if not hasattr(self, "effective_lbl"):
@@ -2339,7 +2500,7 @@ class ShipEditor(tk.Toplevel):
 
     def _update_quality_info(self):
         a, d = CREW_QUALITY.get(self.quality_var.get(), CREW_QUALITY[DEFAULT_CREW_QUALITY])
-        self.quality_info.configure(text=f"NPC crew: Attribute {a} / Department {d}")
+        self.quality_info.configure(text=f"NPC crew: Attr {a} / Dept {d}")
 
     def _auto_calc(self):
         scale = int_var_value(self.scale_var, 4)
@@ -2347,29 +2508,97 @@ class ShipEditor(tk.Toplevel):
                              + int_var_value(self.dept_vars["Security"], 2) + scale)
         self.res_var.set(scale)
 
-    def _refresh_tree(self):
+    def apply_to(self, ship, is_new):
+        """Write the form onto `ship` (a live roster ship or a new one)."""
+        was_full = ship.shields >= ship.max_shields
+        ship.name = self.name_var.get().strip()
+        ship.ship_class = self.class_var.get().strip()
+        ship.side = self.side_var.get() if self.side_var.get() in SIDES else "NPC"
+        ship.scale = clamp(int_var_value(self.scale_var, 4), 1, 10)
+        ship.crew_quality = self.quality_var.get()
+        ship.base_shields = max(0, int_var_value(self.shields_var, ship.base_shields))
+        ship.base_resistance = max(0, int_var_value(self.res_var, ship.base_resistance))
+        ship.tractor_beam = max(0, int_var_value(self.tractor_var, 0))
+        ship.systems = {k: max(1, int_var_value(v, 8)) for k, v in self.sys_vars.items()}
+        ship.departments = {k: clamp(int_var_value(v, 2), 0, 5) for k, v in self.dept_vars.items()}
+        ship.weapons = [copy.deepcopy(w) for w in self.weapons]
+        ship.talents = self.talents.selected()
+        ship.notes = self.notes.get("1.0", "end").strip()
+        if ship.cloaked and not ship.has_talent("Cloaking Device"):
+            ship.disengage_cloak()
+        if is_new or (was_full and ship.shields_up):
+            ship.shields = ship.max_shields if ship.shields_up else 0
+        ship.normalize()
+        return ship
+
+    # ------------------------------------------------------------ weapons
+    def weapon_context(self) -> dict:
+        """The creator's current (unsaved) Scale and Weapons rating for the calculator."""
+        return {"scale": clamp(int_var_value(self.scale_var, 4), 1, 10),
+                "weapons_rating": max(1, int_var_value(self.sys_vars["Weapons"], 8))}
+
+    def _refresh_tree(self, select=None):
         self.tree.delete(*self.tree.get_children())
         for i, w in enumerate(self.weapons):
             self.tree.insert("", "end", iid=str(i), text=w.name,
                              values=(w.wtype, w.damage, w.range, w.quality_text()))
+        if select is not None and 0 <= select < len(self.weapons):
+            self.tree.selection_set(str(select))
 
     def _selected_index(self):
         sel = self.tree.selection()
         return int(sel[0]) if sel else None
 
-    def _regrab(self):
-        try:
-            self.grab_set()
-        except tk.TclError:
-            pass
+    def _on_weapon_select(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        w = self.weapons[idx]
+        ctx = self.weapon_context()
+        self.wform.load(w, ctx["scale"], ctx["weapons_rating"])
+        self.wform_lbl.configure(text=f"Editing weapon: {w.name}")
+        set_enabled(self.update_weapon_btn, True)
 
-    def _weapon_context(self) -> dict:
-        """The editor's current (unsaved) Scale and Weapons rating for the calculator."""
-        return {"scale": clamp(int_var_value(self.scale_var, 4), 1, 10),
-                "weapons_rating": max(1, int_var_value(self.sys_vars["Weapons"], 8))}
+    def clear_weapon_form(self):
+        self.tree.selection_remove(*self.tree.selection())
+        ctx = self.weapon_context()
+        self.wform.load(None, ctx["scale"], ctx["weapons_rating"])
+        self.wform_lbl.configure(text="New weapon - pick a type in the Auto-Calculator or "
+                                      "fill the fields in")
+        set_enabled(self.update_weapon_btn, False)
+
+    def add_weapon(self):
+        w = self.wform.get_weapon()
+        if w is None:
+            return
+        self.weapons.append(w)
+        self._refresh_tree()
+        self._set_dirty(True)
+        self.clear_weapon_form()
+
+    def update_weapon(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        w = self.wform.get_weapon()
+        if w is None:
+            return
+        self.weapons[idx] = w
+        self._refresh_tree(select=idx)
+        self.wform_lbl.configure(text=f"Editing weapon: {w.name}")
+        self._set_dirty(True)
+
+    def remove_weapon(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        del self.weapons[idx]
+        self._refresh_tree()
+        self._set_dirty(True)
+        self.clear_weapon_form()
 
     def _standard_for(self, w):
-        ctx = self._weapon_context()
+        ctx = self.weapon_context()
         return calculate_weapon(w.wtype, ctx["scale"], ctx["weapons_rating"], w.energy_type,
                                 w.delivery, w.torpedo_type, include_bonus=w.include_bonus)[0]
 
@@ -2383,30 +2612,30 @@ class ShipEditor(tk.Toplevel):
                 out.append((w, std.damage))
         return out
 
-    def _recalc_weapons(self):
-        ctx = self._weapon_context()
+    def recalc_weapons(self):
+        parent = self.tree.winfo_toplevel()
+        ctx = self.weapon_context()
         updates = self.weapon_damage_updates()
         unlinked = [w.name for w in self.weapons if self._standard_for(w) is None]
         note = ("\n\nNot linked to the calculator (left unchanged): " + ", ".join(unlinked)
-                + ".\nOpen them with Edit... and pick a type or use Auto-Populate to link "
-                  "them." if unlinked else "")
+                + ".\nSelect them, then pick a type or use Auto-Populate to link them."
+                if unlinked else "")
         head = (f"Scale {ctx['scale']}, Weapons {ctx['weapons_rating']} (Weapons System "
                 f"Damage Bonus +{weapons_damage_bonus(ctx['weapons_rating'])})")
         if not updates:
             messagebox.showinfo("Recalc Damage", f"{head}:\nall calculator-linked weapons "
-                                "already have the standard damage." + note, parent=self)
-            self._regrab()
+                                "already have the standard damage." + note, parent=parent)
             return
         lines = "\n".join(f"  {w.name}: Damage {w.damage} \u2192 {dmg}" for w, dmg in updates)
         question = (f"{head}:\n\n{lines}\n\nApply the standard damage? Ranges, names and "
                     "qualities are kept.")
         if len(updates) == 1:
             chosen = updates if messagebox.askyesno("Recalc Damage", question + note,
-                                                    parent=self) else []
+                                                    parent=parent) else []
         else:
             ans = messagebox.askyesnocancel(
                 "Recalc Damage", question + "\n\nYes = update all, No = choose weapon by "
-                "weapon, Cancel = change nothing." + note, parent=self)
+                "weapon, Cancel = change nothing." + note, parent=parent)
             if ans is None:
                 chosen = []
             elif ans:
@@ -2414,72 +2643,12 @@ class ShipEditor(tk.Toplevel):
             else:
                 chosen = [(w, dmg) for w, dmg in updates if messagebox.askyesno(
                     "Recalc Damage", f"{w.name}: Damage {w.damage} \u2192 {dmg}?\n\n"
-                                     "No keeps the current (hand-set) damage.", parent=self)]
+                                     "No keeps the current (hand-set) damage.", parent=parent)]
         for w, dmg in chosen:
             w.damage = dmg
         if chosen:
             self._refresh_tree()
-        self._regrab()
-
-    def _add_weapon(self):
-        w = WeaponDialog.ask(self, **self._weapon_context())
-        self._regrab()
-        if w:
-            self.weapons.append(w)
-            self._refresh_tree()
-
-    def _edit_weapon(self):
-        idx = self._selected_index()
-        if idx is None:
-            return
-        w = WeaponDialog.ask(self, self.weapons[idx], **self._weapon_context())
-        self._regrab()
-        if w:
-            self.weapons[idx] = w
-            self._refresh_tree()
-
-    def _remove_weapon(self):
-        idx = self._selected_index()
-        if idx is not None:
-            del self.weapons[idx]
-            self._refresh_tree()
-
-    def _save(self):
-        name = self.name_var.get().strip()
-        if not name:
-            messagebox.showerror("Ship", "The ship needs a name.", parent=self)
-            return
-        if name in self.existing:
-            messagebox.showerror("Ship", f"A ship named '{name}' already exists.", parent=self)
-            return
-        ship = self.src
-        was_full = ship.shields >= ship.max_shields
-        ship.name = name
-        ship.ship_class = self.class_var.get().strip()
-        ship.side = self.side_var.get() if self.side_var.get() in SIDES else "NPC"
-        ship.scale = clamp(int_var_value(self.scale_var, 4), 1, 10)
-        ship.crew_quality = self.quality_var.get()
-        ship.base_shields = max(0, int_var_value(self.shields_var, ship.base_shields))
-        ship.base_resistance = max(0, int_var_value(self.res_var, ship.base_resistance))
-        ship.tractor_beam = max(0, int_var_value(self.tractor_var, 0))
-        ship.systems = {k: max(1, int_var_value(v, 8)) for k, v in self.sys_vars.items()}
-        ship.departments = {k: clamp(int_var_value(v, 2), 0, 5) for k, v in self.dept_vars.items()}
-        ship.weapons = self.weapons
-        ship.talents = self.talents.selected()
-        ship.notes = self.notes.get("1.0", "end").strip()
-        if ship.cloaked and not ship.has_talent("Cloaking Device"):
-            ship.disengage_cloak()
-        if self.is_new or (was_full and ship.shields_up):
-            ship.shields = ship.max_shields if ship.shields_up else 0
-        ship.normalize()
-        self.result = ship
-        self.destroy()
-
-    @classmethod
-    def ask(cls, parent, ship, existing_names, title):
-        dlg = cls(parent, ship, existing_names, title)
-        parent.wait_window(dlg)
-        return dlg.result
+            self._set_dirty(True)
 
 
 # =============================================================================
@@ -2499,6 +2668,7 @@ class CombatHelperApp:
         self.dirty = False
         self.pending_attack = None
         self.last_system_hit = None
+        self.last_nature_text = ""
         self._refreshing = False
         self._last_attacker = None
 
@@ -2513,7 +2683,8 @@ class CombatHelperApp:
         self._build_layout()
         self._bind_mousewheel()
         self._startup_load(autoload)
-        for panel in (self.left_panel, self.mid_panel, self.right_panel):
+        for panel in (self.left_panel, self.mid_panel, self.right_panel, self.gen_panel,
+                      self.creator_panel, self.weapons_panel):
             panel.fit_to_content()
         root.after(100, self._place_log_sash)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -2546,6 +2717,11 @@ class CombatHelperApp:
                         background="#1e7e46", padding=(6, 1))
         style.configure("Minor.TLabel", font=self.font_bold, foreground="#ffffff",
                         background="#1f5fbf", padding=(6, 1))
+        style.configure("Step.TLabel", font=self.font_big, foreground="#ffffff",
+                        background=purple, padding=(10, 4))
+        style.configure("TNotebook.Tab", font=self.font_bold, padding=(12, 5))
+        style.configure("Small.TButton", padding=(4, 1))
+        style.map("TNotebook.Tab", foreground=[("selected", purple)])
         for name, color, active in (("Accent", "#1f5fbf", "#2f74db"),
                                     ("EndRound", "#c76b00", "#e07f10"),
                                     ("Damage", "#b03a2e", "#cf4b3d")):
@@ -2584,7 +2760,8 @@ class CombatHelperApp:
         self.dmg_bonus_var = tk.IntVar(value=0)
         self.pierce_var = tk.BooleanVar(value=False)
         self.devastate_var = tk.BooleanVar(value=False)
-        # target state toggles
+        # attacker / target state toggles
+        self.atk_reserve_var = tk.BooleanVar()
         self.tgt_reserve_var = tk.BooleanVar()
         self.tgt_shields_up_var = tk.BooleanVar()
         self.tgt_armed_var = tk.BooleanVar()
@@ -2630,6 +2807,12 @@ class CombatHelperApp:
         cm.add_command(label="New Scene (reset once-per-scene talents)", command=self.new_scene)
         cm.add_command(label="New Adventure (refill Crew Support)", command=self.new_adventure)
         menubar.add_cascade(label="Combat", menu=cm)
+        vm = tk.Menu(menubar, tearoff=False)
+        for i, label in enumerate(("Combat Dashboard", "Fleet & Roster",
+                                   "Ship Creator & Generator")):
+            vm.add_command(label=label, accelerator=f"Ctrl+{i + 1}",
+                           command=lambda i=i: self.select_tab(i))
+        menubar.add_cascade(label="View", menu=vm)
         hm = tk.Menu(menubar, tearoff=False)
         hm.add_command(label="Quick Reference...", command=self.show_reference)
         hm.add_command(label="About", command=self.show_about)
@@ -2642,26 +2825,34 @@ class CombatHelperApp:
         outer = ttk.Frame(self.root)
         outer.pack(fill="both", expand=True)
         self._build_top(outer)
-        self.vpane = vpane = ttk.PanedWindow(outer, orient="vertical")
-        vpane.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        hpane = ttk.PanedWindow(vpane, orient="horizontal")
-        vpane.add(hpane, weight=5)
-        self.left_panel = ScrollableFrame(hpane, width=390)
-        self.mid_panel = ScrollableFrame(hpane, width=500)
-        self.right_panel = ScrollableFrame(hpane, width=470)
-        hpane.add(self.left_panel, weight=1)
-        hpane.add(self.mid_panel, weight=1)
-        hpane.add(self.right_panel, weight=1)
-        self._build_left(self.left_panel.body)
-        self._build_middle(self.mid_panel.body)
-        self._build_right(self.right_panel.body)
-        logf = ttk.LabelFrame(vpane, text="Combat History Log", padding=4)
-        vpane.add(logf, weight=1)
-        self._build_log(logf)
+        self.notebook = nb = ttk.Notebook(outer)
+        nb.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.tab_combat = ttk.Frame(nb)
+        self.tab_fleet = ttk.Frame(nb, padding=8)
+        self.tab_creator = ttk.Frame(nb)
+        nb.add(self.tab_combat, text=self.TAB_TITLES[0])
+        nb.add(self.tab_fleet, text=self.TAB_TITLES[1])
+        nb.add(self.tab_creator, text=self.TAB_TITLES[2])
+        self._build_combat_tab(self.tab_combat)
+        self._build_fleet_tab(self.tab_fleet)
+        self._build_creator_tab(self.tab_creator)
+        for i in range(3):
+            self.root.bind_all(f"<Control-Key-{i + 1}>", lambda _e, i=i: nb.select(i))
 
-    # ---------------------------------------------------------------- top bar
+    TAB_TITLES = ("  1  Combat Dashboard  ", "  2  Fleet & Roster  ",
+                  "  3  Ship Creator & Generator  ")
+
+    def select_tab(self, index):
+        self.notebook.select(index)
+
+    @staticmethod
+    def _step_banner(body, row, text):
+        ttk.Label(body, text=text, style="Step.TLabel", anchor="w").grid(
+            row=row, column=0, sticky="ew", pady=(0, 6))
+
+    # ------------------------------------------------- global header bar
     def _build_top(self, parent):
-        top = ttk.Frame(parent, padding=(8, 6, 8, 2))
+        top = ttk.Frame(parent, padding=(8, 6, 8, 4))
         top.pack(fill="x")
 
         tf = ttk.LabelFrame(top, text="Threat", padding=(6, 0))
@@ -2696,156 +2887,200 @@ class CombatHelperApp:
                     font=self.font_big, state="readonly").pack(side="left", pady=6, padx=2)
         ttk.Label(gf, text="Difficulty\n(-3 to +5)", style="Info.TLabel").pack(side="left", padx=4)
 
-        sf = ttk.Frame(top)
-        sf.pack(side="right")
-        ttk.Button(sf, text="Save Roster to JSON", command=self.save_roster_clicked).pack(
-            side="top", fill="x", pady=1)
-        ttk.Button(sf, text="Load Roster from JSON", command=self.load_roster_clicked).pack(
-            side="top", fill="x", pady=1)
         self.file_lbl = ttk.Label(top, text="", style="Info.TLabel", justify="right")
         self.file_lbl.pack(side="right", padx=8)
 
-    # ------------------------------------------------------------- left panel
+    # ============================================== TAB 1: Combat Dashboard
+    def _build_combat_tab(self, tab):
+        self.vpane = vpane = ttk.PanedWindow(tab, orient="vertical")
+        vpane.pack(fill="both", expand=True, padx=2, pady=2)
+        hpane = ttk.PanedWindow(vpane, orient="horizontal")
+        vpane.add(hpane, weight=5)
+        self.left_panel = ScrollableFrame(hpane, width=400)
+        self.mid_panel = ScrollableFrame(hpane, width=500)
+        self.right_panel = ScrollableFrame(hpane, width=470)
+        hpane.add(self.left_panel, weight=1)
+        hpane.add(self.mid_panel, weight=1)
+        hpane.add(self.right_panel, weight=1)
+        self._build_left(self.left_panel.body)
+        self._build_middle(self.mid_panel.body)
+        self._build_right(self.right_panel.body)
+        logf = ttk.LabelFrame(vpane, text="Combat Log", padding=4)
+        vpane.add(logf, weight=1)
+        self._build_log(logf)
+
+    # ------------------------------------- Step 1: Active Combatants (left)
     def _build_left(self, body):
         body.columnconfigure(0, weight=1)
+        self._step_banner(body, 0, "STEP 1  \u00b7  Active Combatants")
 
-        rf = ttk.LabelFrame(body, text="Ship Roster", padding=6)
-        rf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        rf.columnconfigure(1, weight=1)
-        lbf = ttk.Frame(rf)
-        lbf.grid(row=0, column=0, columnspan=4, sticky="ew")
-        self.roster_lb = tk.Listbox(lbf, height=7, exportselection=False, font=self.font_mono,
-                                    activestyle="dotbox")
-        sb = ttk.Scrollbar(lbf, orient="vertical", command=self.roster_lb.yview)
-        self.roster_lb.configure(yscrollcommand=sb.set)
-        self.roster_lb.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        self.roster_lb.bind("<Double-Button-1>", lambda _e: self.set_selected_as("attacker"))
-        ttk.Label(rf, text="[A] Attacker  [T] Target  |  Shields  T = turns used / Scale\n"
-                           "B = breaches, SHK = Shaken.  Double-click = set Attacker.",
-                  style="Info.TLabel").grid(
-            row=1, column=0, columnspan=4, sticky="w")
-        bf = ttk.Frame(rf)
-        bf.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 2))
-        ttk.Button(bf, text="Set as Attacker",
-                   command=lambda: self.set_selected_as("attacker")).pack(side="left")
-        ttk.Button(bf, text="Set as Target",
-                   command=lambda: self.set_selected_as("target")).pack(side="left", padx=4)
-        ttk.Button(bf, text="Swap", command=self.swap_selection).pack(side="left")
-
-        ttk.Label(rf, text="Attacker:").grid(row=3, column=0, sticky="w")
-        self.attacker_cb = ttk.Combobox(rf, textvariable=self.attacker_var, state="readonly")
-        self.attacker_cb.grid(row=3, column=1, columnspan=3, sticky="ew", pady=1)
-        ttk.Label(rf, text="Target:").grid(row=4, column=0, sticky="w")
-        self.target_cb = ttk.Combobox(rf, textvariable=self.target_var, state="readonly")
-        self.target_cb.grid(row=4, column=1, columnspan=3, sticky="ew", pady=1)
+        sel = ttk.LabelFrame(body, text="Attacker & Target", padding=6)
+        sel.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        sel.columnconfigure(1, weight=1)
+        ttk.Label(sel, text="Attacker").grid(row=0, column=0, sticky="w")
+        self.attacker_cb = ttk.Combobox(sel, textvariable=self.attacker_var, state="readonly")
+        self.attacker_cb.grid(row=0, column=1, sticky="ew", pady=1, padx=(4, 0))
+        ttk.Label(sel, text="Target").grid(row=1, column=0, sticky="w")
+        self.target_cb = ttk.Combobox(sel, textvariable=self.target_var, state="readonly")
+        self.target_cb.grid(row=1, column=1, sticky="ew", pady=1, padx=(4, 0))
+        ttk.Button(sel, text="\u21c5 Swap", width=7, command=self.swap_selection).grid(
+            row=0, column=2, rowspan=2, sticky="ns", padx=(6, 0), pady=1)
         self.attacker_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_selection_change())
         self.target_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_selection_change())
 
-        ef = ttk.Frame(rf)
-        ef.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        for text, cmd in (("New...", self.new_ship), ("Edit...", self.edit_ship),
-                          ("Duplicate", self.duplicate_ship), ("Delete", self.delete_ship)):
-            ttk.Button(ef, text=text, command=cmd, width=9).pack(side="left", padx=(0, 3))
-        xf = ttk.Frame(rf)
-        xf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(3, 0))
-        ttk.Button(xf, text="Export Ship...", command=self.export_ship).pack(side="left")
-        ttk.Button(xf, text="Import Ship(s)...", command=self.import_ships).pack(side="left",
-                                                                                padx=3)
-        ttk.Button(xf, text="Full Repair", command=self.full_repair_selected).pack(side="left")
-
-        gf = ttk.LabelFrame(body, text="Custom Ship / NPC Generator", padding=6)
-        gf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        gf.columnconfigure(1, weight=1)
-        ttk.Label(gf, text="Name (optional)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(gf, textvariable=self.gen_name_var).grid(row=0, column=1, columnspan=3,
-                                                           sticky="ew", pady=1)
-        ttk.Label(gf, text="Scale").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(gf, from_=1, to=7, textvariable=self.gen_scale_var, width=4,
-                    state="readonly").grid(row=1, column=1, sticky="w", pady=1)
-        ttk.Label(gf, text="Crew Quality").grid(row=2, column=0, sticky="w")
-        ttk.Combobox(gf, textvariable=self.gen_quality_var, values=list(CREW_QUALITY),
-                     state="readonly", width=13).grid(row=2, column=1, sticky="w", pady=1)
-        self.gen_info = ttk.Label(gf, text="", style="Info.TLabel")
-        self.gen_info.grid(row=2, column=2, columnspan=2, sticky="w", padx=4)
-        ttk.Label(gf, text="Profile").grid(row=3, column=0, sticky="w")
-        ttk.Combobox(gf, textvariable=self.gen_profile_var, values=list(GENERATOR_PROFILES),
-                     state="readonly", width=20).grid(row=3, column=1, columnspan=2, sticky="w",
-                                                      pady=1)
-        ttk.Label(gf, text="Starship Talents (multi-select)").grid(row=4, column=0,
-                                                                    columnspan=4, sticky="w",
-                                                                    pady=(4, 0))
-        self.gen_talents = TalentPicker(gf, height=5, allow_custom=False)
-        self.gen_talents.grid(row=5, column=0, columnspan=4, sticky="ew")
-        gbf = ttk.Frame(gf)
-        gbf.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        ttk.Button(gbf, text="Generate NPC Ship", style="Accent.TButton",
-                   command=self.generate_npc).pack(side="left")
-        ttk.Button(gbf, text="Custom Ship Editor...", command=self.new_ship).pack(side="left",
-                                                                                  padx=4)
-        self._update_gen_info()
-
-        af = ttk.LabelFrame(body, text="Active Ship Status (Attacker)", padding=6)
+        af = ttk.LabelFrame(body, text="Active Attacker", padding=6)
         af.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         af.columnconfigure(0, weight=1)
         self.active_name_lbl = ttk.Label(af, text="-", style="Header.TLabel")
         self.active_name_lbl.grid(row=0, column=0, sticky="w")
+        self.active_info_lbl = ttk.Label(af, text="", style="Info.TLabel", wraplength=370)
+        self.active_info_lbl.grid(row=1, column=0, sticky="w")
         self.active_bar = ShieldBar(af)
-        self.active_bar.grid(row=1, column=0, sticky="ew", pady=3)
-        ctl = ttk.Frame(af)
-        ctl.grid(row=2, column=0, sticky="ew", pady=(0, 3))
-        self.cloak_btn = ttk.Button(ctl, text="Engage Cloak", command=self.toggle_cloak)
-        self.cloak_btn.pack(side="left")
-        self.cloak_lbl = ttk.Label(ctl, text="", style="Alert.TLabel")
-        self.cloak_lbl.pack(side="left", padx=6)
-        self.active_res_lbl = ttk.Label(af, text="", style="Bold.TLabel", wraplength=360,
+        self.active_bar.grid(row=2, column=0, sticky="ew", pady=3)
+        self.active_res_lbl = ttk.Label(af, text="", style="Bold.TLabel", wraplength=370,
                                         justify="left")
         self.active_res_lbl.grid(row=3, column=0, sticky="w")
+        trow = ttk.Frame(af)
+        trow.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        trow.columnconfigure(0, weight=1)
+        self.turns_lbl = ttk.Label(trow, text="Turns used: 0 / 0", style="Bold.TLabel")
+        self.turns_lbl.grid(row=0, column=0, sticky="w")
+        tbf = ttk.Frame(trow)
+        tbf.grid(row=0, column=1, sticky="e")
+        ttk.Button(tbf, text="+1 Turn", style="Small.TButton",
+                   command=lambda: self.adjust_turns(1)).pack(side="left")
+        ttk.Button(tbf, text="-1", style="Small.TButton", width=3,
+                   command=lambda: self.adjust_turns(-1)).pack(side="left", padx=2)
+        ttk.Button(tbf, text="Reset", style="Small.TButton",
+                   command=self.reset_turns).pack(side="left")
+        self.turns_bar = ttk.Progressbar(trow, mode="determinate", maximum=1)
+        self.turns_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=2)
+        self.turns_info_lbl = ttk.Label(af, text="", justify="left", wraplength=370,
+                                        style="Info.TLabel")
+        self.turns_info_lbl.grid(row=5, column=0, sticky="w", pady=(2, 0))
+        ctl = ttk.Frame(af)
+        ctl.grid(row=6, column=0, sticky="ew", pady=(4, 0))
+        self.atk_reserve_cb = ttk.Checkbutton(ctl, text="Reserve Power",
+                                              variable=self.atk_reserve_var,
+                                              command=self.toggle_attacker_reserve)
+        self.atk_reserve_cb.pack(side="left")
+        self.cloak_btn = ttk.Button(ctl, text="Engage Cloak", command=self.toggle_cloak)
+        self.cloak_btn.pack(side="left", padx=(8, 0))
+        self.cloak_lbl = ttk.Label(ctl, text="", style="Alert.TLabel")
+        self.cloak_lbl.pack(side="left", padx=6)
         pools = ttk.Frame(af)
-        pools.grid(row=4, column=0, sticky="w", pady=(3, 0))
+        pools.grid(row=7, column=0, sticky="w", pady=(3, 0))
         self.crew_support_lbl = ttk.Label(pools, text="Crew Support: -")
         self.crew_support_lbl.grid(row=0, column=0, sticky="w")
-        ttk.Button(pools, text="-", width=3,
+        ttk.Button(pools, text="-", width=3, style="Small.TButton",
                    command=lambda: self.adjust_pool_counter("crew_support_used", -1)).grid(
             row=0, column=1, padx=(6, 1))
-        ttk.Button(pools, text="+", width=3,
+        ttk.Button(pools, text="+", width=3, style="Small.TButton",
                    command=lambda: self.adjust_pool_counter("crew_support_used", 1)).grid(
             row=0, column=2)
         self.small_craft_lbl = ttk.Label(pools, text="Small Craft: -")
         self.small_craft_lbl.grid(row=1, column=0, sticky="w")
         self.small_craft_minus = ttk.Button(
-            pools, text="-", width=3,
+            pools, text="-", width=3, style="Small.TButton",
             command=lambda: self.adjust_pool_counter("small_craft_deployed", -1))
         self.small_craft_minus.grid(row=1, column=1, padx=(6, 1))
         self.small_craft_plus = ttk.Button(
-            pools, text="+", width=3,
+            pools, text="+", width=3, style="Small.TButton",
             command=lambda: self.adjust_pool_counter("small_craft_deployed", 1))
         self.small_craft_plus.grid(row=1, column=2)
-        self.active_status_lbl = ttk.Label(af, text="", justify="left", wraplength=360)
-        self.active_status_lbl.grid(row=5, column=0, sticky="w", pady=(3, 0))
+        self.details_btn = ttk.Button(af, text="Show ship details \u25b8",
+                                      style="Small.TButton",
+                                      command=self.toggle_attacker_details)
+        self.details_btn.grid(row=8, column=0, sticky="w", pady=(4, 0))
+        self.active_status_lbl = ttk.Label(af, text="", justify="left", wraplength=370)
+        self.active_status_lbl.grid(row=9, column=0, sticky="w", pady=(3, 0))
+        self.active_status_lbl.grid_remove()
 
-        tt = ttk.LabelFrame(body, text="Turn Tracker", padding=6)
-        tt.grid(row=3, column=0, sticky="ew")
-        tt.columnconfigure(0, weight=1)
-        self.turns_lbl = ttk.Label(tt, text="Turns used: 0 / 0", style="Bold.TLabel")
-        self.turns_lbl.grid(row=0, column=0, sticky="w")
-        self.turns_bar = ttk.Progressbar(tt, mode="determinate", maximum=1)
-        self.turns_bar.grid(row=1, column=0, sticky="ew", pady=3)
-        self.turns_info_lbl = ttk.Label(tt, text="", justify="left", wraplength=360)
-        self.turns_info_lbl.grid(row=2, column=0, sticky="w")
-        tbf = ttk.Frame(tt)
-        tbf.grid(row=3, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(tbf, text="+1 Turn", command=lambda: self.adjust_turns(1)).pack(side="left")
-        ttk.Button(tbf, text="-1 Turn", command=lambda: self.adjust_turns(-1)).pack(side="left",
-                                                                                  padx=3)
-        ttk.Button(tbf, text="Reset Turns", command=self.reset_turns).pack(side="left")
+        tf = ttk.LabelFrame(body, text="Target Quick Status", padding=6)
+        tf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        tf.columnconfigure(0, weight=1)
+        self.tgt_name_lbl = ttk.Label(tf, text="-", style="Header.TLabel")
+        self.tgt_name_lbl.grid(row=0, column=0, sticky="w")
+        self.tgt_info_lbl = ttk.Label(tf, text="", style="Info.TLabel", wraplength=370)
+        self.tgt_info_lbl.grid(row=1, column=0, sticky="w")
+        self.tgt_bar = ShieldBar(tf)
+        self.tgt_bar.grid(row=2, column=0, sticky="ew", pady=3)
+        self.tgt_res_lbl = ttk.Label(tf, text="", style="Bold.TLabel")
+        self.tgt_res_lbl.grid(row=3, column=0, sticky="w")
+        self.tgt_breach_lbl = ttk.Label(tf, text="", wraplength=370, justify="left")
+        self.tgt_breach_lbl.grid(row=4, column=0, sticky="w")
+        self.tgt_fx_lbl = ttk.Label(tf, text="", wraplength=370, justify="left")
+        self.tgt_fx_lbl.grid(row=5, column=0, sticky="w")
+        shf = ttk.Frame(tf)
+        shf.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(shf, text="Shields:").pack(side="left")
+        ttk.Button(shf, text="-1", width=3, style="Small.TButton",
+                   command=lambda: self.adjust_target_shields(-1)).pack(side="left", padx=1)
+        ttk.Button(shf, text="+1", width=3, style="Small.TButton",
+                   command=lambda: self.adjust_target_shields(1)).pack(side="left", padx=1)
+        ttk.Spinbox(shf, from_=0, to=99, textvariable=self.tgt_set_shields_var, width=4).pack(
+            side="left", padx=(6, 1))
+        ttk.Button(shf, text="Set", width=4, style="Small.TButton",
+                   command=self.set_target_shields).pack(side="left")
+        ttk.Button(shf, text="Reset (Full)", style="Small.TButton",
+                   command=self.restore_target_shields).pack(side="left", padx=4)
+        cf = ttk.Frame(tf)
+        cf.grid(row=7, column=0, sticky="w", pady=(3, 0))
+        ttk.Checkbutton(cf, text="Reserve Power", variable=self.tgt_reserve_var,
+                        command=lambda: self.toggle_target_flag("reserve_power",
+                                                                self.tgt_reserve_var)).pack(
+            side="left")
+        ttk.Checkbutton(cf, text="Shields Up", variable=self.tgt_shields_up_var,
+                        command=self.toggle_target_shields).pack(side="left", padx=6)
+        ttk.Checkbutton(cf, text="Weapons Armed", variable=self.tgt_armed_var,
+                        command=lambda: self.toggle_target_flag("weapons_armed",
+                                                                self.tgt_armed_var)).pack(
+            side="left")
+        tcf = ttk.Frame(tf)
+        tcf.grid(row=8, column=0, sticky="w", pady=(3, 0))
+        self.tgt_pds_cb = ttk.Checkbutton(
+            tcf, text="Point Defense active", variable=self.tgt_pds_var,
+            command=lambda: self.toggle_target_flag("point_defense_active", self.tgt_pds_var))
+        self.tgt_pds_cb.pack(side="left")
+        self.tgt_cloak_btn = ttk.Button(tcf, text="Toggle Target Cloak",
+                                        command=self.toggle_target_cloak)
+        self.tgt_cloak_btn.pack(side="left", padx=6)
 
-    # ----------------------------------------------------------- middle panel
+        cf2 = ttk.LabelFrame(body, text="Complications & Effects (Target)", padding=6)
+        cf2.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        cf2.columnconfigure(0, weight=1)
+        self.comp_lb = tk.Listbox(cf2, height=3, exportselection=False)
+        self.comp_lb.grid(row=0, column=0, columnspan=4, sticky="ew")
+        cbf = ttk.Frame(cf2)
+        cbf.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(cbf, text="Add Complication...", style="Small.TButton",
+                   command=self.add_complication).pack(side="left")
+        ttk.Button(cbf, text="Remove", style="Small.TButton",
+                   command=self.remove_complication).pack(side="left", padx=3)
+        ttk.Button(cbf, text="Clear Temp Effects", style="Small.TButton",
+                   command=self.clear_target_effects).pack(side="left")
+
+        stf = ttk.LabelFrame(body, text="Scene Traits", padding=6)
+        stf.grid(row=5, column=0, sticky="ew")
+        stf.columnconfigure(0, weight=1)
+        self.trait_lb = tk.Listbox(stf, height=3, exportselection=False)
+        self.trait_lb.grid(row=0, column=0, sticky="ew")
+        tbf2 = ttk.Frame(stf)
+        tbf2.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(tbf2, text="Add Trait...", style="Small.TButton",
+                   command=self.add_scene_trait).pack(side="left")
+        ttk.Button(tbf2, text="Remove", style="Small.TButton",
+                   command=self.remove_scene_trait).pack(side="left", padx=3)
+        ttk.Label(stf, text="Create Trait actions add their traits here.",
+                  style="Info.TLabel").grid(row=2, column=0, sticky="w", pady=(2, 0))
+
+    # ------------------------------ Step 2: Action & Rule Guidance (middle)
     def _build_middle(self, body):
         body.columnconfigure(0, weight=1)
+        self._step_banner(body, 0, "STEP 2  \u00b7  Action & Rule Guidance")
 
-        sf = ttk.LabelFrame(body, text="Bridge Station & Action Selector", padding=6)
-        sf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        sf = ttk.LabelFrame(body, text="Bridge Station & Action", padding=6)
+        sf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         sf.columnconfigure(1, weight=1)
         ttk.Label(sf, text="Station").grid(row=0, column=0, sticky="w")
         self.station_cb = ttk.Combobox(sf, textvariable=self.station_var,
@@ -2871,22 +3106,22 @@ class CombatHelperApp:
         self.failing_btn.grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 0))
         self.failing_btn.grid_remove()
 
-        of = ttk.LabelFrame(body, text="Action Options", padding=6)
-        of.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        of = ttk.LabelFrame(body, text="Action Parameters", padding=6)
+        of.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         of.columnconfigure(1, weight=1)
-        ttk.Label(of, text="Weapon").grid(row=0, column=0, sticky="w")
+        rows = {}
+        lbl = ttk.Label(of, text="Weapon")
         self.weapon_cb = ttk.Combobox(of, textvariable=self.weapon_var, state="readonly")
-        self.weapon_cb.grid(row=0, column=1, sticky="ew", pady=1)
+        rows["weapon"] = (lbl, self.weapon_cb)
         self.salvo_cb = ttk.Checkbutton(of, text="Torpedo Salvo (+3 Threat)",
                                         variable=self.salvo_var)
-        self.salvo_cb.grid(row=1, column=1, sticky="w")
-        ttk.Label(of, text="Range to target").grid(row=2, column=0, sticky="w")
+        rows["salvo"] = (None, self.salvo_cb)
+        lbl = ttk.Label(of, text="Range to target")
         self.range_cb = ttk.Combobox(of, textvariable=self.range_var, values=RANGES,
                                      state="readonly", width=10)
-        self.range_cb.grid(row=2, column=1, sticky="w", pady=1)
-        ttk.Label(of, text="Targeting Solution").grid(row=3, column=0, sticky="w")
+        rows["range"] = (lbl, self.range_cb)
+        lbl = ttk.Label(of, text="Targeting Solution")
         tsf = ttk.Frame(of)
-        tsf.grid(row=3, column=1, sticky="w")
         self.tsol_rb1 = ttk.Radiobutton(tsf, text="Re-roll worst d20", value="reroll",
                                         variable=self.tsol_mode_var)
         self.tsol_rb2 = ttk.Radiobutton(tsf, text="Choose system hit", value="choose",
@@ -2895,63 +3130,92 @@ class CombatHelperApp:
         self.tsol_rb2.pack(side="left", padx=6)
         self.tsol_both_lbl = ttk.Label(tsf, text="", style="Good.TLabel")
         self.tsol_both_lbl.pack(side="left")
-        ttk.Label(of, text="Scan for Weakness").grid(row=4, column=0, sticky="w")
+        rows["tsol"] = (lbl, tsf)
+        lbl = ttk.Label(of, text="Scan for Weakness")
         swf = ttk.Frame(of)
-        swf.grid(row=4, column=1, sticky="w")
         self.scan_rb1 = ttk.Radiobutton(swf, text="+2 Damage", value="damage",
                                         variable=self.scan_mode_var)
         self.scan_rb2 = ttk.Radiobutton(swf, text="Piercing", value="piercing",
                                         variable=self.scan_mode_var)
         self.scan_rb1.pack(side="left")
         self.scan_rb2.pack(side="left", padx=6)
+        rows["scan"] = (lbl, swf)
         self.regen_cb = ttk.Checkbutton(of, text="Regenerate Shields: spend 1 Momentum for "
                                                  "+2 Shields", variable=self.regen_boost_var)
-        self.regen_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        rows["regen"] = (None, self.regen_cb)
         self.secreact_btn = ttk.Button(of, text="Secondary Reactors: spend 2 to restore Reserve "
                                                 "Power (1/scene)",
                                        command=lambda: self.use_secondary_reactors())
-        self.secreact_btn.grid(row=6, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        rows["secreact"] = (None, self.secreact_btn)
         self.override_cb = ttk.Checkbutton(of, text="Override - acting from another console "
                                                     "(+1 Difficulty)",
                                            variable=self.override_var)
-        self.override_cb.grid(row=7, column=0, columnspan=2, sticky="w", pady=(3, 0))
-        obf = ttk.Frame(of)
-        obf.grid(row=8, column=0, columnspan=2, sticky="w", pady=(3, 0))
-        ttk.Label(obf, text="Other Task base Difficulty").pack(side="left")
-        self.other_base_sb = ttk.Spinbox(obf, from_=0, to=5, textvariable=self.other_base_var,
+        rows["override"] = (None, self.override_cb)
+        lbl = ttk.Label(of, text="Other Task base Difficulty")
+        self.other_base_sb = ttk.Spinbox(of, from_=0, to=5, textvariable=self.other_base_var,
                                          width=4, state="readonly")
-        self.other_base_sb.pack(side="left", padx=4)
+        rows["other"] = (lbl, self.other_base_sb)
+        rows["none"] = (None, ttk.Label(of, text="No extra parameters for this action.",
+                                        style="Info.TLabel"))
+        for r, (label, ctrl) in enumerate(rows.values()):
+            if label is None:
+                ctrl.grid(row=r, column=0, columnspan=2, sticky="w", pady=1)
+            else:
+                label.grid(row=r, column=0, sticky="w", pady=1)
+                ctrl.grid(row=r, column=1, sticky="ew" if ctrl is self.weapon_cb else "w",
+                          pady=1)
+        self.param_rows = rows
 
         df = ttk.LabelFrame(body, text="Difficulty", padding=6)
-        df.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        df.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         df.columnconfigure(1, weight=1)
         self.diff_total_lbl = ttk.Label(df, text="2", style="Diff.TLabel", width=3,
                                         anchor="center")
         self.diff_total_lbl.grid(row=0, column=0, rowspan=2, padx=(0, 8))
-        ttk.Label(df, text="Total = Base + Weapon mods + Context + GM Modifier",
+        ttk.Label(df, text="Final Difficulty = Base + Weapon Mods + Context + GM Mod",
                   style="Info.TLabel").grid(row=0, column=1, sticky="w")
         self.diff_parts_lbl = ttk.Label(df, text="", style="Bold.TLabel", wraplength=400,
                                         justify="left")
         self.diff_parts_lbl.grid(row=1, column=1, sticky="w")
 
-        hf = ttk.LabelFrame(body, text="Rule Hints", padding=6)
-        hf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        hf = ttk.LabelFrame(body, text="Rule Hint Card", padding=6)
+        hf.grid(row=4, column=0, sticky="ew", pady=(0, 6))
         hf.columnconfigure(0, weight=1)
-        self.hints = tk.Text(hf, height=15, width=50, wrap="word", relief="flat",
-                             background="#f6f3fb",
-                             padx=6, pady=4, font=tkfont.nametofont("TkDefaultFont"))
+        card = tk.Frame(hf, background="#5b2c83", padx=2, pady=2)
+        card.grid(row=0, column=0, columnspan=2, sticky="ew")
+        card.columnconfigure(0, weight=1)
+        self.hints = tk.Text(card, height=13, width=50, wrap="word", relief="flat",
+                             background="#f6f3fb", padx=8, pady=6,
+                             font=tkfont.nametofont("TkDefaultFont"))
         self.hints.grid(row=0, column=0, sticky="ew")
-        hsb = ttk.Scrollbar(hf, orient="vertical", command=self.hints.yview)
+        hsb = ttk.Scrollbar(card, orient="vertical", command=self.hints.yview)
         hsb.grid(row=0, column=1, sticky="ns")
         self.hints.configure(yscrollcommand=hsb.set)
-        self.hints.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
+        self.hints.tag_configure("head", font=self.font_big, foreground="#5b2c83")
         self.hints.tag_configure("key", font=self.font_bold)
-        self.hints.tag_configure("warn", foreground="#b03a2e")
+        self.hints.tag_configure("warn", foreground="#b03a2e", font=self.font_bold)
         self.hints.tag_configure("good", foreground="#1e7e46")
         self.hints.configure(state="disabled")
+        ttk.Label(hf, text="Active Talent & Weapon Quality Reminders", style="Bold.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(6, 2))
+        alf = ttk.Frame(hf)
+        alf.grid(row=2, column=0, columnspan=2, sticky="ew")
+        alf.columnconfigure(0, weight=1)
+        self.alerts = tk.Text(alf, height=8, width=50, wrap="word", relief="flat",
+                              background="#fbf6ee", padx=6, pady=4,
+                              font=tkfont.nametofont("TkDefaultFont"))
+        self.alerts.grid(row=0, column=0, sticky="ew")
+        asb = ttk.Scrollbar(alf, orient="vertical", command=self.alerts.yview)
+        asb.grid(row=0, column=1, sticky="ns")
+        self.alerts.configure(yscrollcommand=asb.set)
+        self.alerts.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
+        self.alerts.tag_configure("warn", foreground="#b03a2e")
+        self.alerts.tag_configure("good", foreground="#1e7e46")
+        self.alerts.tag_configure("dim", foreground="#6b6b78")
+        self.alerts.configure(state="disabled")
 
-        rf = ttk.LabelFrame(body, text="Action Resolver", padding=6)
-        rf.grid(row=4, column=0, sticky="ew")
+        rf = ttk.LabelFrame(body, text="Roll & Resolve", padding=6)
+        rf.grid(row=5, column=0, sticky="ew")
         rf.columnconfigure(5, weight=1)
         ttk.Label(rf, text="Crew Attribute").grid(row=0, column=0, sticky="w")
         self.attr_sb = ttk.Spinbox(rf, from_=4, to=16, textvariable=self.crew_attr_var, width=4)
@@ -2996,74 +3260,13 @@ class CombatHelperApp:
         self.result_lbl = ttk.Label(rf, text="", wraplength=440, justify="left")
         self.result_lbl.grid(row=6, column=0, columnspan=6, sticky="w")
 
-    # ------------------------------------------------------------ right panel
+    # ------------------------- Step 3: Damage & Breach Resolution (right)
     def _build_right(self, body):
         body.columnconfigure(0, weight=1)
+        self._step_banner(body, 0, "STEP 3  \u00b7  Damage & Breach Resolution")
 
-        tf = ttk.LabelFrame(body, text="Target Status", padding=6)
-        tf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        tf.columnconfigure(0, weight=1)
-        self.tgt_name_lbl = ttk.Label(tf, text="-", style="Header.TLabel")
-        self.tgt_name_lbl.grid(row=0, column=0, sticky="w")
-        self.tgt_info_lbl = ttk.Label(tf, text="", style="Info.TLabel", wraplength=430)
-        self.tgt_info_lbl.grid(row=1, column=0, sticky="w")
-        self.tgt_bar = ShieldBar(tf)
-        self.tgt_bar.grid(row=2, column=0, sticky="ew", pady=3)
-        self.tgt_res_lbl = ttk.Label(tf, text="", style="Bold.TLabel")
-        self.tgt_res_lbl.grid(row=3, column=0, sticky="w")
-        self.tgt_fx_lbl = ttk.Label(tf, text="", wraplength=430, justify="left")
-        self.tgt_fx_lbl.grid(row=4, column=0, sticky="w")
-        cf = ttk.Frame(tf)
-        cf.grid(row=5, column=0, sticky="w", pady=(3, 0))
-        ttk.Checkbutton(cf, text="Reserve Power", variable=self.tgt_reserve_var,
-                        command=lambda: self.toggle_target_flag("reserve_power",
-                                                                self.tgt_reserve_var)).pack(
-            side="left")
-        ttk.Checkbutton(cf, text="Shields Up", variable=self.tgt_shields_up_var,
-                        command=self.toggle_target_shields).pack(side="left", padx=6)
-        ttk.Checkbutton(cf, text="Weapons Armed", variable=self.tgt_armed_var,
-                        command=lambda: self.toggle_target_flag("weapons_armed",
-                                                                self.tgt_armed_var)).pack(
-            side="left")
-        tcf = ttk.Frame(tf)
-        tcf.grid(row=7, column=0, sticky="w", pady=(3, 0))
-        self.tgt_pds_cb = ttk.Checkbutton(
-            tcf, text="Point Defense active", variable=self.tgt_pds_var,
-            command=lambda: self.toggle_target_flag("point_defense_active", self.tgt_pds_var))
-        self.tgt_pds_cb.pack(side="left")
-        self.tgt_cloak_btn = ttk.Button(tcf, text="Toggle Target Cloak",
-                                        command=self.toggle_target_cloak)
-        self.tgt_cloak_btn.pack(side="left", padx=6)
-        shf = ttk.Frame(tf)
-        shf.grid(row=6, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(shf, text="Shields:").pack(side="left")
-        ttk.Button(shf, text="-1", width=3,
-                   command=lambda: self.adjust_target_shields(-1)).pack(side="left", padx=1)
-        ttk.Button(shf, text="+1", width=3,
-                   command=lambda: self.adjust_target_shields(1)).pack(side="left", padx=1)
-        ttk.Spinbox(shf, from_=0, to=99, textvariable=self.tgt_set_shields_var, width=4).pack(
-            side="left", padx=(6, 1))
-        ttk.Button(shf, text="Set", width=4, command=self.set_target_shields).pack(side="left")
-        ttk.Button(shf, text="Restore Full", command=self.restore_target_shields).pack(
-            side="left", padx=4)
-
-        dfm = ttk.LabelFrame(body, text="Tactical Combat & Damage Resolver", padding=6)
-        alf = ttk.LabelFrame(body, text="Active Quality & Talent Alerts", padding=6)
-        alf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        alf.columnconfigure(0, weight=1)
-        self.alerts = tk.Text(alf, height=12, width=50, wrap="word", relief="flat",
-                              background="#fbf6ee", padx=6, pady=4,
-                              font=tkfont.nametofont("TkDefaultFont"))
-        self.alerts.grid(row=0, column=0, sticky="ew")
-        asb = ttk.Scrollbar(alf, orient="vertical", command=self.alerts.yview)
-        asb.grid(row=0, column=1, sticky="ns")
-        self.alerts.configure(yscrollcommand=asb.set)
-        self.alerts.tag_configure("head", font=self.font_bold, foreground="#5b2c83")
-        self.alerts.tag_configure("warn", foreground="#b03a2e")
-        self.alerts.tag_configure("good", foreground="#1e7e46")
-        self.alerts.tag_configure("dim", foreground="#6b6b78")
-        self.alerts.configure(state="disabled")
-        dfm.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        dfm = ttk.LabelFrame(body, text="Tactical Combat Resolver", padding=6)
+        dfm.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         dfm.columnconfigure(2, weight=1)
         self.pending_lbl = ttk.Label(dfm, text="", wraplength=430, justify="left",
                                      style="Good.TLabel")
@@ -3072,12 +3275,12 @@ class CombatHelperApp:
         self.dmg_weapon_cb = ttk.Combobox(dfm, textvariable=self.dmg_weapon_var, state="readonly")
         self.dmg_weapon_cb.grid(row=1, column=1, columnspan=2, sticky="ew", pady=1)
         self.dmg_weapon_cb.bind("<<ComboboxSelected>>", lambda _e: self.on_damage_weapon_change())
-        ttk.Label(dfm, text="Base damage").grid(row=2, column=0, sticky="w")
+        ttk.Label(dfm, text="Base damage rating").grid(row=2, column=0, sticky="w")
         ttk.Spinbox(dfm, from_=0, to=40, textvariable=self.dmg_base_var, width=5).grid(
             row=2, column=1, sticky="w", pady=1)
         self.dmg_auto_lbl = ttk.Label(dfm, text="", style="Info.TLabel")
         self.dmg_auto_lbl.grid(row=2, column=2, sticky="w", padx=(6, 0))
-        ttk.Label(dfm, text="Bonus damage").grid(row=3, column=0, sticky="w")
+        ttk.Label(dfm, text="Extra damage").grid(row=3, column=0, sticky="w")
         ttk.Spinbox(dfm, from_=0, to=12, textvariable=self.dmg_bonus_var, width=5).grid(
             row=3, column=1, sticky="w", pady=1)
         self.dmg_cost_lbl = ttk.Label(dfm, text="", style="Info.TLabel")
@@ -3098,15 +3301,16 @@ class CombatHelperApp:
         ttk.Button(dbf, text="Clear Pending", command=self.clear_pending_attack).grid(
             row=0, column=1, sticky="ew", padx=(4, 0))
 
-        hf = ttk.LabelFrame(body, text="System Hit Generator & Shaken Resolver", padding=6)
-        hf.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        hf = ttk.LabelFrame(body, text="System Hit & Breach Roller", padding=6)
+        hf.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         hf.columnconfigure(1, weight=1)
         self.syshit_btn = ttk.Button(hf, text="Roll System Hit",
                                      command=self.roll_system_hit_clicked)
         self.syshit_btn.grid(row=0, column=0, sticky="w")
         self.syshit_lbl = ttk.Label(hf, text="-", style="Bold.TLabel")
         self.syshit_lbl.grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Button(hf, text="Add Breach There", command=self.breach_last_hit).grid(row=0, column=2)
+        ttk.Button(hf, text="Add Breach There", style="Small.TButton",
+                   command=self.breach_last_hit).grid(row=0, column=2)
         tbl = ttk.Frame(hf)
         tbl.grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
         ttk.Label(tbl, text="Table:").pack(side="left")
@@ -3114,14 +3318,17 @@ class CombatHelperApp:
                            state="readonly", width=14)
         tcb.pack(side="left", padx=4)
         tcb.bind("<<ComboboxSelected>>", lambda _e: self.on_hit_table_change())
-        self.hit_table_lbl = ttk.Label(hf, text="", style="Info.TLabel")
+        self.hit_table_lbl = ttk.Label(hf, text="", style="Info.TLabel", wraplength=430)
         self.hit_table_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
-        ttk.Button(hf, text="Open Shaken Resolver for Target...",
-                   command=self.shaken_resolver_clicked).grid(row=3, column=0, columnspan=3,
-                                                              sticky="w", pady=(2, 0))
+        nrow = ttk.Frame(hf)
+        nrow.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        ttk.Button(nrow, text="Roll Nature of Breach (d20)",
+                   command=self.roll_nature_of_breach_clicked).pack(side="left")
+        self.nature_lbl = ttk.Label(nrow, text="", style="Bold.TLabel", wraplength=250)
+        self.nature_lbl.pack(side="left", padx=6)
 
-        bf = ttk.LabelFrame(body, text="Breach Tracker (Target)", padding=6)
-        bf.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        bf = ttk.LabelFrame(hf, text="Breach Manager (Target)", padding=4)
+        bf.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         for col, text in enumerate(("System", "Rtg", "Br.", "", "", "Nature of Breach",
                                     "Failing:")):
             ttk.Label(bf, text=text, style="Bold.TLabel").grid(row=0, column=col, sticky="w",
@@ -3134,9 +3341,9 @@ class CombatHelperApp:
             rating.grid(row=i, column=1, sticky="w", padx=2)
             count = ttk.Label(bf, text="0", style="Bold.TLabel", width=3)
             count.grid(row=i, column=2, sticky="w", padx=2)
-            ttk.Button(bf, text="-", width=2,
+            ttk.Button(bf, text="-", width=2, style="Small.TButton",
                        command=lambda s=sysname: self.adjust_breach(s, -1)).grid(row=i, column=3)
-            ttk.Button(bf, text="+", width=2,
+            ttk.Button(bf, text="+", width=2, style="Small.TButton",
                        command=lambda s=sysname: self.adjust_breach(s, 1)).grid(row=i, column=4)
             cond_var = tk.StringVar(value=no_condition)
             cond_cb = ttk.Combobox(bf, textvariable=cond_var, state="readonly", width=13,
@@ -3144,39 +3351,23 @@ class CombatHelperApp:
             cond_cb.grid(row=i, column=5, sticky="w", padx=(6, 2), pady=1)
             cond_cb.bind("<<ComboboxSelected>>", lambda _e, s=sysname, v=cond_var:
                          self.set_breach_condition_manual(s, "" if v.get() == "-" else v.get()))
-            off_btn = ttk.Button(bf, text="\u2192 Offline",
+            off_btn = ttk.Button(bf, text="\u2192 Offline", style="Small.TButton",
                                  command=lambda s=sysname: self.failing_to_offline(s))
             off_btn.grid(row=i, column=6, sticky="w")
             self.breach_rows[sysname] = {"rating": rating, "count": count, "cond": cond_cb,
                                          "cond_var": cond_var, "offline": off_btn}
-        self.breach_total_lbl = ttk.Label(bf, text="", wraplength=430, justify="left")
+        self.breach_total_lbl = ttk.Label(bf, text="", wraplength=420, justify="left")
         self.breach_total_lbl.grid(row=len(SYSTEMS) + 1, column=0, columnspan=7, sticky="w",
                                    pady=(4, 0))
 
-        cf2 = ttk.LabelFrame(body, text="Complications & Effects (Target)", padding=6)
-        cf2.grid(row=5, column=0, sticky="ew")
-        cf2.columnconfigure(0, weight=1)
-        self.comp_lb = tk.Listbox(cf2, height=4, exportselection=False)
-        self.comp_lb.grid(row=0, column=0, columnspan=4, sticky="ew")
-        cbf = ttk.Frame(cf2)
-        cbf.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(cbf, text="Add Complication...", command=self.add_complication).pack(
-            side="left")
-        ttk.Button(cbf, text="Remove", command=self.remove_complication).pack(side="left", padx=3)
-        ttk.Button(cbf, text="Clear Temp Effects", command=self.clear_target_effects).pack(
-            side="left")
-
-        stf = ttk.LabelFrame(body, text="Scene Traits", padding=6)
-        stf.grid(row=6, column=0, sticky="ew", pady=(6, 0))
-        stf.columnconfigure(0, weight=1)
-        self.trait_lb = tk.Listbox(stf, height=3, exportselection=False)
-        self.trait_lb.grid(row=0, column=0, sticky="ew")
-        tbf = ttk.Frame(stf)
-        tbf.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(tbf, text="Add Trait...", command=self.add_scene_trait).pack(side="left")
-        ttk.Button(tbf, text="Remove", command=self.remove_scene_trait).pack(side="left", padx=3)
-        ttk.Label(tbf, text="(Create Trait actions add here)", style="Info.TLabel").pack(
-            side="left", padx=4)
+        skf = ttk.LabelFrame(body, text="Shaken Handler", padding=6)
+        skf.grid(row=3, column=0, sticky="ew")
+        skf.columnconfigure(0, weight=1)
+        self.shaken_status_lbl = ttk.Label(skf, text="", wraplength=430, justify="left")
+        self.shaken_status_lbl.grid(row=0, column=0, sticky="w")
+        ttk.Button(skf, text="Open Shaken Resolver for Target (Auto-Roll d20 / Manual)...",
+                   command=self.shaken_resolver_clicked).grid(row=1, column=0, sticky="w",
+                                                              pady=(4, 0))
 
     # ---------------------------------------------------------------- the log
     def _build_log(self, parent):
@@ -3185,7 +3376,8 @@ class CombatHelperApp:
         self.log_text = ScrolledText(parent, height=9, wrap="word", font=self.font_mono,
                                      state="disabled")
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        self.log_text.tag_configure("separator", foreground="#c76b00", font=self.font_bold)
+        self.log_text.tag_configure("separator", foreground="#7a3e00", font=self.font_bold,
+                                    background="#ffe9c7", spacing1=4, spacing3=4)
         self.log_text.tag_configure("alert", foreground="#b03a2e")
         self.log_text.tag_configure("success", foreground="#1e7e46")
         self.log_text.tag_configure("fail", foreground="#7d3c98")
@@ -3204,6 +3396,170 @@ class CombatHelperApp:
                 self.vpane.sashpos(0, max(300, height - 150))
         except tk.TclError:
             pass
+
+    # ================================================ TAB 2: Fleet & Roster
+    ROSTER_COLUMNS = (("role", "", 34), ("name", "Ship", 170), ("side", "Side", 55),
+                      ("cls", "Class", 170), ("scale", "Scale", 48), ("shields", "Shields", 80),
+                      ("res", "Res.", 44), ("breaches", "Breaches", 80),
+                      ("turns", "Turns", 55), ("status", "Status", 260))
+
+    def _build_fleet_tab(self, tab):
+        tab.columnconfigure(0, weight=3)
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(1, weight=1)
+        ttk.Label(tab, text="Ships in the scene", style="Step.TLabel", anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+        tf = ttk.Frame(tab)
+        tf.grid(row=1, column=0, sticky="nsew")
+        tf.columnconfigure(0, weight=1)
+        tf.rowconfigure(0, weight=1)
+        cols = [c for c, _h, _w in self.ROSTER_COLUMNS]
+        self.roster_tree = ttk.Treeview(tf, columns=cols, show="headings", height=12,
+                                        selectmode="browse")
+        for col, head, width in self.ROSTER_COLUMNS:
+            self.roster_tree.heading(col, text=head)
+            self.roster_tree.column(col, width=width, minwidth=30, anchor="w",
+                                    stretch=col in ("status", "cls", "name"))
+        vsb = ttk.Scrollbar(tf, orient="vertical", command=self.roster_tree.yview)
+        xsb = ttk.Scrollbar(tf, orient="horizontal", command=self.roster_tree.xview)
+        self.roster_tree.configure(yscrollcommand=vsb.set, xscrollcommand=xsb.set)
+        self.roster_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        self.roster_tree.tag_configure("attacker", background="#dbe8fb")
+        self.roster_tree.tag_configure("target", background="#fde3df")
+        self.roster_tree.tag_configure("shaken", foreground="#b03a2e")
+        self.roster_tree.bind("<<TreeviewSelect>>", lambda _e: self._refresh_fleet_details())
+        self.roster_tree.bind("<Double-Button-1>", lambda _e: self.set_selected_as("attacker"))
+        ttk.Label(tf, text="Blue row = Attacker, red row = Target.  Double-click a row to set it "
+                           "as Attacker.  Status: SHK = Shaken.",
+                  style="Info.TLabel").grid(row=2, column=0, columnspan=2, sticky="w",
+                                            pady=(3, 0))
+
+        bf = ttk.Frame(tab)
+        bf.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        cbx = ttk.LabelFrame(bf, text="Combat", padding=6)
+        cbx.pack(side="left", fill="y")
+        ttk.Button(cbx, text="Set as Attacker",
+                   command=lambda: self.set_selected_as("attacker")).pack(side="left")
+        ttk.Button(cbx, text="Set as Target",
+                   command=lambda: self.set_selected_as("target")).pack(side="left", padx=4)
+        ttk.Button(cbx, text="Swap", command=self.swap_selection).pack(side="left")
+        mbx = ttk.LabelFrame(bf, text="Manage", padding=6)
+        mbx.pack(side="left", fill="y", padx=6)
+        for text, cmd in (("New Ship...", self.new_ship),
+                          ("Edit in Ship Creator", self.edit_ship),
+                          ("Duplicate", self.duplicate_ship), ("Delete", self.delete_ship),
+                          ("Full Repair", self.full_repair_selected)):
+            ttk.Button(mbx, text=text, command=cmd).pack(side="left", padx=(0, 3))
+
+        side = ttk.Frame(tab)
+        side.grid(row=1, column=1, rowspan=2, sticky="nsew", padx=(8, 0))
+        side.columnconfigure(0, weight=1)
+        side.rowconfigure(1, weight=1)
+        ff = ttk.LabelFrame(side, text="Roster File & Sharing (JSON)", padding=6)
+        ff.grid(row=0, column=0, sticky="ew")
+        ff.columnconfigure(0, weight=1)
+        self.fleet_file_lbl = ttk.Label(ff, text="", style="Info.TLabel", wraplength=300,
+                                        justify="left")
+        self.fleet_file_lbl.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Button(ff, text="Save Roster to JSON", style="Accent.TButton",
+                   command=self.save_roster_clicked).grid(row=1, column=0, columnspan=2,
+                                                          sticky="ew")
+        ttk.Button(ff, text="Load Roster from JSON", command=self.load_roster_clicked).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=3)
+        ttk.Button(ff, text="Save As...", command=self.save_roster_as).grid(
+            row=3, column=0, sticky="ew")
+        ttk.Button(ff, text="Load From File...", command=self.load_roster_from).grid(
+            row=3, column=1, sticky="ew", padx=(3, 0))
+        ttk.Button(ff, text="Reset Roster to Presets", command=self.reset_to_presets).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(3, 0))
+        ttk.Separator(ff).grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Button(ff, text="Import Ship(s)...", command=self.import_ships).grid(
+            row=6, column=0, sticky="ew")
+        ttk.Button(ff, text="Export Selected Ship...", command=self.export_ship).grid(
+            row=6, column=1, sticky="ew", padx=(3, 0))
+        df = ttk.LabelFrame(side, text="Selected Ship Details", padding=6)
+        df.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        df.columnconfigure(0, weight=1)
+        df.rowconfigure(0, weight=1)
+        self.fleet_details = tk.Text(df, width=40, height=12, wrap="word", relief="flat",
+                                     background="#f6f3fb", padx=6, pady=4,
+                                     font=tkfont.nametofont("TkDefaultFont"))
+        self.fleet_details.grid(row=0, column=0, sticky="nsew")
+        self.fleet_details.tag_configure("head", font=self.font_big, foreground="#5b2c83")
+        self.fleet_details.configure(state="disabled")
+
+    # ===================================== TAB 3: Ship Creator & Generator
+    def _build_creator_tab(self, tab):
+        hpane = ttk.PanedWindow(tab, orient="horizontal")
+        hpane.pack(fill="both", expand=True, padx=2, pady=2)
+        self.gen_panel = ScrollableFrame(hpane, width=340)
+        self.creator_panel = ScrollableFrame(hpane, width=480)
+        self.weapons_panel = ScrollableFrame(hpane, width=520)
+        hpane.add(self.gen_panel, weight=1)
+        hpane.add(self.creator_panel, weight=1)
+        hpane.add(self.weapons_panel, weight=1)
+        self._build_generator(self.gen_panel.body)
+        self._step_banner(self.creator_panel.body, 0, "Custom Ship Creator")
+        self._step_banner(self.weapons_panel.body, 0, "Weapons & Auto-Calculator")
+        fields = ttk.Frame(self.creator_panel.body)
+        fields.grid(row=1, column=0, sticky="nsew")
+        weapons = ttk.Frame(self.weapons_panel.body)
+        weapons.grid(row=1, column=0, sticky="nsew")
+        self.creator_panel.body.columnconfigure(0, weight=1)
+        self.weapons_panel.body.columnconfigure(0, weight=1)
+        self.creator = ShipCreator(fields, weapons, on_save=self.creator_save,
+                                   on_dirty=self._on_creator_dirty,
+                                   confirm=lambda t, m: self.ask_yes_no(t, m))
+
+    def _build_generator(self, body):
+        body.columnconfigure(0, weight=1)
+        self._step_banner(body, 0, "NPC Quick Generator")
+        gf = ttk.LabelFrame(body, text="Generate an NPC ship", padding=6)
+        gf.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        gf.columnconfigure(1, weight=1)
+        ttk.Label(gf, text="Name (optional)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(gf, textvariable=self.gen_name_var, width=16).grid(row=0, column=1,
+                                                                     columnspan=2, sticky="ew",
+                                                                     pady=1)
+        ttk.Label(gf, text="Scale").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(gf, from_=1, to=7, textvariable=self.gen_scale_var, width=4,
+                    state="readonly").grid(row=1, column=1, sticky="w", pady=1)
+        ttk.Label(gf, text="Crew Quality").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(gf, textvariable=self.gen_quality_var, values=list(CREW_QUALITY),
+                     state="readonly", width=13).grid(row=2, column=1, sticky="w", pady=1)
+        self.gen_info = ttk.Label(gf, text="", style="Info.TLabel")
+        self.gen_info.grid(row=3, column=1, columnspan=2, sticky="w")
+        ttk.Label(gf, text="Spaceframe Profile").grid(row=4, column=0, sticky="w")
+        ttk.Combobox(gf, textvariable=self.gen_profile_var, values=list(GENERATOR_PROFILES),
+                     state="readonly", width=20).grid(row=4, column=1, columnspan=2,
+                                                      sticky="w", pady=1)
+        ttk.Label(gf, text="Starship Talents (multi-select)").grid(row=5, column=0,
+                                                                    columnspan=3, sticky="w",
+                                                                    pady=(4, 0))
+        self.gen_talents = TalentPicker(gf, height=8, allow_custom=False)
+        self.gen_talents.grid(row=6, column=0, columnspan=3, sticky="ew")
+        gbf = ttk.Frame(gf)
+        gbf.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Button(gbf, text="Generate NPC \u2192 Roster", style="Accent.TButton",
+                   command=self.generate_npc).pack(side="top", fill="x")
+        ttk.Button(gbf, text="Generate into Ship Creator (tweak first)",
+                   command=self.generate_npc_into_creator).pack(side="top", fill="x", pady=(3, 0))
+        self._update_gen_info()
+
+        lf = ttk.LabelFrame(body, text="Edit a roster ship", padding=6)
+        lf.grid(row=2, column=0, sticky="ew")
+        lf.columnconfigure(0, weight=1)
+        self.creator_pick_var = tk.StringVar()
+        self.creator_pick_cb = ttk.Combobox(lf, textvariable=self.creator_pick_var,
+                                            state="readonly")
+        self.creator_pick_cb.grid(row=0, column=0, sticky="ew")
+        ttk.Button(lf, text="Load into Creator", command=self.load_picked_into_creator).grid(
+            row=0, column=1, padx=(4, 0))
+        ttk.Button(lf, text="New Blank Ship", command=self.new_ship).grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
 
     def _bind_mousewheel(self):
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -3266,9 +3622,9 @@ class CombatHelperApp:
         return f"{base} ({i})"
 
     def selected_roster_ship(self):
-        sel = self.roster_lb.curselection()
-        if sel and sel[0] < len(self.ships):
-            return self.ships[sel[0]]
+        sel = self.roster_tree.selection()
+        if sel and sel[0].isdigit() and int(sel[0]) < len(self.ships):
+            return self.ships[int(sel[0])]
         return None
 
     # =========================================================== dialogs api
@@ -3442,6 +3798,7 @@ class CombatHelperApp:
             self._refresh_left_status()
             self._refresh_middle()
             self._refresh_right()
+            self._refresh_creator_picker()
         finally:
             self._refreshing = False
 
@@ -3451,6 +3808,11 @@ class CombatHelperApp:
         self.round_lbl.configure(text=str(self.round))
         self.file_lbl.configure(text=f"{os.path.basename(self.data_file)}"
                                      f"{'  (unsaved changes)' if self.dirty else ''}")
+        self.fleet_file_lbl.configure(
+            text=f"File: {self.data_file}\n" + ("Unsaved changes - Save Roster to JSON "
+                                                "(Ctrl+S) to keep them." if self.dirty
+                                                else "All changes saved."),
+            style="Alert.TLabel" if self.dirty else "Info.TLabel")
         self.root.title(f"{APP_NAME}{' *' if self.dirty else ''}")
 
     def _refresh_selectors(self):
@@ -3484,20 +3846,44 @@ class CombatHelperApp:
         if self.dmg_weapon_var.get() not in dvals:
             self.dmg_weapon_var.set(CUSTOM_WEAPON)
 
+    @staticmethod
+    def _roster_status(s) -> str:
+        bits = [fx.split(" (")[0] for fx in s.active_effects()]
+        bits = ["SHK" if b == "Shaken" else b for b in bits]
+        if not s.reserve_power:
+            bits.append("No Reserve Power")
+        return ", ".join(bits) or "Ready"
+
     def _refresh_roster(self):
-        sel = self.roster_lb.curselection()
-        self.roster_lb.delete(0, "end")
+        tree = self.roster_tree
+        prev = self.selected_roster_ship()
+        prev_name = prev.name if prev is not None else None
+        tree.delete(*tree.get_children())
         a, t = self.attacker_var.get(), self.target_var.get()
-        for s in self.ships:
-            mark = "[A]" if s.name == a else ("[T]" if s.name == t else "   ")
-            side = "PC " if s.side == "Player" else "NPC"
-            extra = f" B{s.total_breaches()}" if s.total_breaches() else ""
-            extra += " SHK" if s.shaken else ""
-            self.roster_lb.insert(
-                "end", f"{mark} {s.name[:18]:<18} {side} S{s.scale} "
-                       f"{s.shields:>2}/{s.max_shields:<2} T{s.turns_used}/{s.scale}{extra}")
-        if sel and sel[0] < len(self.ships):
-            self.roster_lb.selection_set(sel[0])
+        for i, s in enumerate(self.ships):
+            role = "A" if s.name == a else ("T" if s.name == t else "")
+            tags = ["attacker"] if role == "A" else (["target"] if role == "T" else [])
+            if s.shaken:
+                tags.append("shaken")
+            tree.insert("", "end", iid=str(i), tags=tags, values=(
+                role, s.name, s.side, s.ship_class or "-", s.scale,
+                f"{s.shields}/{s.max_shields}", s.effective_resistance,
+                s.total_breaches() or "-", f"{s.turns_used}/{s.scale}", self._roster_status(s)))
+            if s.name == prev_name:
+                tree.selection_set(str(i))
+        self._refresh_fleet_details()
+
+    def _refresh_fleet_details(self):
+        s = self.selected_roster_ship()
+        txt = self.fleet_details
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        if s is None:
+            txt.insert("end", "Select a ship in the table to see its full details.")
+        else:
+            txt.insert("end", s.name + "\n", "head")
+            txt.insert("end", self._ship_status_text(s))
+        txt.configure(state="disabled")
 
     def _ship_status_text(self, s):
         a, d = s.crew_ratings()
@@ -3530,9 +3916,12 @@ class CombatHelperApp:
         s = self.attacker
         if s is None:
             self.active_name_lbl.configure(text="No ship selected")
+            self.active_info_lbl.configure(text="")
             self.active_bar.set_value(0, 0)
             self.active_status_lbl.configure(text="")
             self.active_res_lbl.configure(text="")
+            self.atk_reserve_var.set(False)
+            set_enabled(self.atk_reserve_cb, False)
             set_enabled(self.cloak_btn, False)
             self.cloak_lbl.configure(text="")
             self.turns_lbl.configure(text="Turns used: - / -")
@@ -3540,8 +3929,14 @@ class CombatHelperApp:
             self.turns_info_lbl.configure(text="")
             return
         self.active_name_lbl.configure(text=s.name)
+        a_val, d_val = s.crew_ratings()
+        self.active_info_lbl.configure(
+            text=f"{s.ship_class or 'Unknown class'} | {s.side} | Scale {s.scale} | "
+                 f"Crew {s.crew_quality} ({a_val}/{d_val})")
         self.active_bar.set_value(s.shields, s.max_shields)
         self.active_status_lbl.configure(text=self._ship_status_text(s))
+        set_enabled(self.atk_reserve_cb, True)
+        self.atk_reserve_var.set(s.reserve_power)
         has_cloak = s.has_talent("Cloaking Device")
         set_enabled(self.cloak_btn, has_cloak)
         self.cloak_btn.configure(text="Decloak (Minor)" if s.cloaked else "Engage Cloak")
@@ -3575,8 +3970,8 @@ class CombatHelperApp:
         self.turns_bar.configure(maximum=max(1, s.scale), value=min(s.turns_used, s.scale))
         info = "Systems used this round: " + (", ".join(s.systems_used) if s.systems_used
                                               else "none")
-        info += ("\nRe-using a system in the same round costs 1 Threat "
-                 + ("(the NPC spends it)." if s.side == "NPC" else "(added to the pool)."))
+        info += ("  (re-use costs 1 Threat" + (", NPC spends it)" if s.side == "NPC"
+                                               else ", added to the pool)"))
         if s.brace_for_impact:
             info += "\nBRACE FOR IMPACT: no Major Action on the next turn."
         self.turns_info_lbl.configure(text=info)
@@ -3618,6 +4013,17 @@ class CombatHelperApp:
         set_enabled(self.regen_cb, name == "Regenerate Shields")
         set_enabled(self.secreact_btn, ship is not None and ship.has_talent("Secondary Reactors")
                     and not ship.secondary_reactors_used and not ship.reserve_power)
+        self._show_param_rows({
+            "weapon": is_fire,
+            "salvo": is_fire and weapon is not None and weapon.wtype == "Torpedo",
+            "range": bool(adef["attack"] or adef["range_penalty"] or name in TARGETED_ACTIONS),
+            "tsol": is_fire and (tsol or fts),
+            "scan": name == "Scan for Weakness",
+            "regen": name == "Regenerate Shields",
+            "secreact": ship is not None and ship.has_talent("Secondary Reactors"),
+            "override": bool(adef["roll"] or self.override_var.get()),
+            "other": bool(adef.get("custom_base")),
+        })
 
         rolls = adef["roll"]
         manual = self.mode_var.get() == "manual"
@@ -3664,6 +4070,19 @@ class CombatHelperApp:
         self.dice_cost_lbl.configure(
             text=f"Bonus dice cost: {cost} {payer}" if cost else "3rd d20 = 1, 4th = 2, 5th = 3")
         self._write_hints(self._hint_lines(name, adef, ship, target, weapon, total))
+
+    def _show_param_rows(self, visible):
+        """Action Parameters only shows the options that apply to the chosen action."""
+        any_shown = False
+        for key, (label, ctrl) in self.param_rows.items():
+            show = visible.get(key, False) if key != "none" else not any_shown
+            any_shown = any_shown or show
+            for widget in (label, ctrl):
+                if widget is not None:
+                    if show:
+                        widget.grid()
+                    else:
+                        widget.grid_remove()
 
     def _write_hints(self, lines):
         self.hints.configure(state="normal")
@@ -3919,6 +4338,8 @@ class CombatHelperApp:
                 set_enabled(row["cond"], False)
                 set_enabled(row["offline"], False)
             self.breach_total_lbl.configure(text="")
+            self.tgt_breach_lbl.configure(text="")
+            self.shaken_status_lbl.configure(text="Select a target ship.", style="Info.TLabel")
             self.comp_lb.delete(0, "end")
         else:
             a, d = t.crew_ratings()
@@ -3933,6 +4354,23 @@ class CombatHelperApp:
             fx = t.active_effects()
             self.tgt_fx_lbl.configure(text="Effects: " + (", ".join(fx) if fx else "none"),
                                       style="Alert.TLabel" if t.shaken else "TLabel")
+            br = [f"{k} {n}" + (f" ({t.breach_condition(k)})" if t.breach_condition(k) else "")
+                  for k, n in t.breaches.items() if n]
+            self.tgt_breach_lbl.configure(
+                text="Breaches: " + ("; ".join(br) if br else "none"),
+                style="Alert.TLabel" if br else "TLabel")
+            half, quarter = t.max_shields * 0.5, t.max_shields * 0.25
+            pct = f" ({t.shields / t.max_shields:.0%})" if t.max_shields else ""
+            status = (f"{t.name}: Shields {t.shields}/{t.max_shields}{pct}. Shaken when a hit "
+                      f"takes Shields below 50% (<{half:g}) or 25% (<{quarter:g}); detected "
+                      "automatically when damage is applied.")
+            if t.shaken:
+                status += "\nSTATUS: SHAKEN (until End Round) - dropping below 25% in the " \
+                          "same attack causes a Breach instead."
+            elif t.max_shields and t.shields < half:
+                status += "\nShields are already below 50%."
+            self.shaken_status_lbl.configure(text=status,
+                                             style="Alert.TLabel" if t.shaken else "TLabel")
             self.tgt_reserve_var.set(t.reserve_power)
             self.tgt_shields_up_var.set(t.shields_up)
             self.tgt_armed_var.set(t.weapons_armed)
@@ -3963,6 +4401,7 @@ class CombatHelperApp:
         for trait in self.scene_traits:
             self.trait_lb.insert("end", trait)
         self.syshit_lbl.configure(text=self.last_system_hit or "-")
+        self.nature_lbl.configure(text=getattr(self, "last_nature_text", ""))
         self.syshit_btn.configure(text=f"Roll System Hit (d{self.hit_table[-1][1]})")
         self.hit_table_lbl.configure(text="  ".join(
             f"{lo}-{hi} {SYSTEM_ABBR[n]}" if lo != hi else f"{lo} {SYSTEM_ABBR[n]}"
@@ -4208,6 +4647,7 @@ class CombatHelperApp:
         self.override_var.set(False)
         self.log(f"--- END OF ROUND {ended} ---", "separator")
         self.round += 1
+        self.log(f"=== ROUND {self.round} ===", "separator")
         self.log(f"Round {self.round} begins: turn counters, Modulate Shields, Evasive Action, "
                  "Defensive Fire, Attack Pattern, Jammed, Slowed and Shaken flags reset.")
         self.changed()
@@ -5156,8 +5596,13 @@ class CombatHelperApp:
                         if ship.breach_condition(sysname) else ""))
             return
         nature, roll = result
+        self._apply_breach_nature(ship, sysname, nature, roll)
+
+    def _apply_breach_nature(self, ship, sysname, nature, roll):
         how = f"rolled {roll}" if roll else "chosen"
         final = ship.set_breach_condition(sysname, nature)
+        self.last_nature_text = f"{ship.name} {SYSTEM_ABBR[sysname]}: {how} -> {nature}" + (
+            f" (stays {final})" if final != nature else "")
         if final != nature:
             self.log(f"Nature of Breach ({how}): {nature} - {ship.name} {sysname} stays {final} "
                      "(more severe).", "alert")
@@ -5168,6 +5613,27 @@ class CombatHelperApp:
             self.log(f"GM: {ship.name} {sysname} is Damaged - consider spending Threat to cause "
                      "a complication.", "pool")
         self.changed()
+
+    def roll_nature_of_breach_clicked(self):
+        """Step 3 button: roll the d20 Nature of Breach for a breached target system."""
+        t = self.target
+        if t is None:
+            self.show_error("No target", "Select a target ship first.")
+            return
+        breached = [k for k in SYSTEMS if t.breaches.get(k, 0)]
+        if not breached:
+            self.show_info("Nature of Breach", f"{t.name} has no breached systems. Add a breach "
+                                               "first (Add Breach There, or + in the Breach "
+                                               "Manager).")
+            return
+        default = self.last_system_hit if self.last_system_hit in breached else breached[0]
+        sysname = default if len(breached) == 1 else self.ask_choice(
+            "Roll Nature of Breach", f"Roll the Nature of Breach (d20) for which {t.name} "
+                                     "system?", breached, default)
+        if not sysname:
+            return
+        roll, nature = roll_breach_nature(self.rng)
+        self._apply_breach_nature(t, sysname, nature, roll)
 
     def set_breach_condition_manual(self, sysname, nature):
         t = self.target
@@ -5344,6 +5810,22 @@ class CombatHelperApp:
         self.log(f"{ship.name} decloaks (Minor Action){reason}. Shields remain DOWN - use "
                  "Tactical > Prepare to raise them.", "alert")
 
+    def toggle_attacker_reserve(self):
+        s = self.attacker
+        if s is None:
+            return
+        s.reserve_power = bool(self.atk_reserve_var.get())
+        self.log(f"{s.name}: reserve power -> {'Yes' if s.reserve_power else 'No'}.")
+        self.changed()
+
+    def toggle_attacker_details(self):
+        if self.active_status_lbl.winfo_manager():
+            self.active_status_lbl.grid_remove()
+            self.details_btn.configure(text="Show ship details \u25b8")
+        else:
+            self.active_status_lbl.grid()
+            self.details_btn.configure(text="Hide ship details \u25be")
+
     def toggle_target_flag(self, attr, var):
         t = self.target
         if t is None:
@@ -5415,35 +5897,84 @@ class CombatHelperApp:
         self.changed()
 
     # ========================================================= roster editing
+    def _creator_may_replace(self) -> bool:
+        """The Ship Creator holds unsaved edits: ask before loading something else."""
+        return not self.creator.dirty or self.ask_yes_no(
+            "Ship Creator", "The Ship Creator has unsaved edits"
+            + (f" to {self.creator.editing_name}" if self.creator.editing_name else "")
+            + ".\n\nDiscard them?")
+
+    def _on_creator_dirty(self, dirty):
+        if hasattr(self, "notebook"):
+            self.notebook.tab(self.tab_creator, text=self.TAB_TITLES[2].rstrip()
+                              + (" *  " if dirty else "  "))
+
     def new_ship(self):
-        ship = ShipEditor.ask(self.root, None, [s.name for s in self.ships], "Custom Ship Creator")
-        if ship:
-            self.ships.append(ship)
-            self.log(f"Custom ship added: {ship.name} (Scale {ship.scale}, {ship.crew_quality} "
-                     "crew).")
-            self.changed()
+        if not self._creator_may_replace():
+            return
+        self.creator.new_blank()
+        self.select_tab(2)
 
     def edit_ship(self):
         ship = self.selected_roster_ship() or self.attacker
         if ship is None:
+            self.show_info("Edit", "Select a ship in the roster table first.")
             return
-        old = ship.name
-        edited = ShipEditor.ask(self.root, ship, [s.name for s in self.ships],
-                                f"Edit Ship - {ship.name}")
-        if not edited:
+        if not self._creator_may_replace():
             return
-        self.ships[self.ships.index(ship)] = edited
-        if old != edited.name:
-            for var in (self.attacker_var, self.target_var):
-                if var.get() == old:
-                    var.set(edited.name)
-            if self.pending_attack:
-                for key in ("attacker", "target"):
-                    if self.pending_attack[key] == old:
-                        self.pending_attack[key] = edited.name
-            if self._last_attacker == old:
-                self._last_attacker = edited.name
-        self.log(f"Ship updated: {edited.name}.")
+        self.creator.load_ship(ship)
+        self.select_tab(2)
+
+    def load_picked_into_creator(self):
+        ship = self.ship_by_name(self.creator_pick_var.get())
+        if ship is not None and self._creator_may_replace():
+            self.creator.load_ship(ship)
+
+    def _refresh_creator_picker(self):
+        names = [s.name for s in self.ships]
+        self.creator_pick_cb.configure(values=names)
+        if self.creator_pick_var.get() not in names:
+            self.creator_pick_var.set(names[0] if names else "")
+
+    def creator_save(self, as_new=False):
+        """Ship Creator 'Save' buttons: write the creator's ship into the roster."""
+        ed = self.creator
+        name = ed.name_var.get().strip()
+        if not name:
+            self.show_error("Ship Creator", "The ship needs a name.")
+            return
+        target = None
+        if ed.editing_name and not as_new:
+            target = self.ship_by_name(ed.editing_name)
+            if target is None and not self.ask_yes_no(
+                    "Ship Creator", f"{ed.editing_name} is no longer in the roster.\n\n"
+                                    f"Add {name} as a new ship?"):
+                return
+        taken = {s.name for s in self.ships if s is not target}
+        if name in taken:
+            self.show_error("Ship Creator", f"A ship named '{name}' already exists. Pick "
+                                            "another name.")
+            return
+        if target is None:
+            ship = ed.apply_to(Ship(name=name), is_new=True)
+            self.ships.append(ship)
+            self.log(f"Custom ship added: {ship.name} (Scale {ship.scale}, {ship.crew_quality} "
+                     "crew).")
+        else:
+            old = target.name
+            ship = ed.apply_to(target, is_new=False)
+            if old != ship.name:
+                for var in (self.attacker_var, self.target_var):
+                    if var.get() == old:
+                        var.set(ship.name)
+                if self.pending_attack:
+                    for key in ("attacker", "target"):
+                        if self.pending_attack[key] == old:
+                            self.pending_attack[key] = ship.name
+                if self._last_attacker == old:
+                    self._last_attacker = ship.name
+            self.log(f"Ship updated: {ship.name}.")
+        ed.mark_saved(ship)
         self.changed()
 
     def duplicate_ship(self):
@@ -5495,6 +6026,20 @@ class CombatHelperApp:
                  f"{ship.max_shields}, Resistance {ship.effective_resistance}"
                  + (f", talents: {', '.join(ship.talents)}" if ship.talents else "") + ".")
         self.changed()
+
+    def generate_npc_into_creator(self):
+        """Generate an NPC into the Ship Creator to tweak before adding it to the roster."""
+        if not self._creator_may_replace():
+            return
+        quality = self.gen_quality_var.get()
+        profile = self.gen_profile_var.get()
+        scale = clamp(int_var_value(self.gen_scale_var, 4), 1, 7)
+        name = self.gen_name_var.get().strip() or f"NPC {profile.split(' ')[0]} S{scale}"
+        ship = generate_npc_ship(self.unique_name(name), scale, quality, profile, self.rng,
+                                 talents=self.gen_talents.selected())
+        self.creator.load_ship(ship, as_new=True)
+        self.gen_name_var.set("")
+        self.log(f"Generated {ship.name} into the Ship Creator - adjust it, then Save to Roster.")
 
     # ============================================================ persistence
     def roster_to_dict(self):
@@ -5588,6 +6133,7 @@ class CombatHelperApp:
                     "replace it."))
         if not loaded:
             self._load_presets()
+        self.log(f"=== ROUND {self.round} ===", "separator")
         self.on_station_change()
 
     def _load_presets(self):
@@ -5683,6 +6229,10 @@ class CombatHelperApp:
             self.refresh_all()
 
     def on_close(self):
+        if self.creator.dirty and not self.ask_yes_no(
+                "Ship Creator", "The Ship Creator has unsaved edits that are not in the roster."
+                                "\n\nDiscard them and exit?"):
+            return
         if self.dirty:
             ans = self.ask_yes_no_cancel("Save before exit?",
                                          f"Save the roster to {self.data_file} before exiting?")
