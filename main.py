@@ -3773,9 +3773,10 @@ class CombatHelperApp:
         if adef["kind"] == "Major":
             self._consume_turn(ship, adef["system"])
         self._apply_effect(ship, name, adef, target, weapon, outcome)
-        if self.override_var.get() and adef["roll"]:
+        if self.override_var.get():
             self.override_var.set(False)
-            self.log(f"Override used for {name} (+1 Difficulty applied).")
+            self.log(f"Override used for {name}"
+                     + (" (+1 Difficulty applied)." if adef["roll"] else " (no task roll)."))
         self.changed()
 
     def _precheck_action(self, ship, name, adef, weapon, target=None):
