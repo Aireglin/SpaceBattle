@@ -106,8 +106,13 @@ selected ship.
 * The creator works on a copy. Saving writes your changes onto the **live** roster
   ship, so damage, breaches and turns it took while you were editing are kept. A
   rename carries over to the Attacker / Target selection. Unsaved creator edits are
-  marked with `*` on the tab and `● unsaved edits`; the app asks before discarding
-  them (loading another ship, *New Blank Ship*, or exiting).
+  marked with `*` on the tab and `● unsaved edits`, and so is a weapon that is still
+  in the weapon form but not added or updated. The app asks before discarding them
+  (loading another ship, *New Blank Ship*, or exiting). When you save the ship with a
+  weapon still in the form, it asks whether to add or update that weapon first.
+* After *Load Roster* or *Reset to Presets*, the creator reloads the ship it was
+  editing. If it held unsaved edits, they are kept as an unlinked copy that *Save*
+  adds as a new ship, so a freshly loaded ship is never overwritten.
 
 ## Weapon Auto-Calculator
 

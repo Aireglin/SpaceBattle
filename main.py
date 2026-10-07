@@ -123,7 +123,7 @@ SYSTEM_HIT_TABLE = [
     (11, 12, "Weapons"),
 ]
 SYSTEM_HIT_DIE = SYSTEM_HIT_TABLE[-1][1]
-# Alternative weighted d20 table (rulebook-style) - selectable in the System Hit Generator.
+# Alternative weighted d20 table (rulebook-style) - selectable in the System Hit Roller.
 SYSTEM_HIT_TABLE_D20 = [
     (1, 1, "Communications"),
     (2, 2, "Computers"),
@@ -395,7 +395,7 @@ BRIDGE_STATIONS = {
             "Major", "Engines", attr="Daring", dept="Conn", assist=("Engines", "Conn"),
             base=2, attack=True, needs_target=True,
             reminder="Target must be within Close range. On success BOTH ships suffer "
-                     "collision damage - resolve it in the Damage Resolver (suggested damage "
+                     "collision damage - resolve it in the Tactical Combat Resolver (damage "
                      "is pre-filled; the GM may edit it)."),
         "Warp": _action(
             "Major", "Engines", attr="Control", dept="Conn", assist=("Engines", "Conn"),
@@ -428,7 +428,8 @@ BRIDGE_STATIONS = {
             base=ENERGY_BASE_DIFFICULTY, attack=True, needs_target=True,
             reminder="Energy weapons: Difficulty 2. Torpedoes: Difficulty 3 and +1 Threat "
                      "(Salvo: +3 Threat; NPCs spend Threat instead). Cumbersome: +1 "
-                     "Difficulty. On a hit, resolve damage in the Tactical panel."),
+                     "Difficulty. On a hit, resolve damage in Step 3 (Tactical Combat "
+                     "Resolver)."),
         "Defensive Fire": _action(
             "Major", "Weapons", roll=False, attr="Daring", dept="Security",
             assist=("Weapons", "Security"), task_label="Defence roll when attacked",
@@ -538,7 +539,7 @@ BRIDGE_STATIONS = {
             "Major", None, attr="Appropriate Attribute", dept="Department", base=2,
             task_label="Suggested task",
             reminder="Difficulty 2. Create, change or remove a trait in the scene using an "
-                     "appropriate Attribute + Department (set them in the Action Resolver)."),
+                     "appropriate Attribute + Department (set them in Roll & Resolve)."),
         "Assist": _action(
             "Major", None, roll=False,
             reminder="Nominate an ally: you assist their next task with your own Attribute + "
@@ -547,7 +548,8 @@ BRIDGE_STATIONS = {
             "Major", None, roll=False,
             reminder="Control another position from your current console: pick the station "
                      "and action to perform - that task is +1 Difficulty (the Override box in "
-                     "Action Options is ticked for you). Override itself uses no extra turn."),
+                     "Action Parameters is ticked for you). Override itself uses no extra "
+                     "turn."),
         "Pass": _action(
             "Major", None, roll=False,
             reminder="Decline to take a Major Action this turn (the turn is still used). "
@@ -559,14 +561,15 @@ BRIDGE_STATIONS = {
         "Other Tasks": _action(
             "Major", None, attr="GM's choice", dept="GM's choice", custom_base=True,
             reminder="Any other task the GM calls for, including Extended Tasks. Set its base "
-                     "Difficulty in Action Options and the Attribute / Department in the "
-                     "Action Resolver."),
+                     "Difficulty in Action Parameters and the Attribute / Department in "
+                     "Roll & Resolve."),
     },
 }
 
 # Actions a cloaked ship cannot take, and actions that need a detectable target.
 HOSTILE_ACTIONS = ("Fire", "Ram", "Tractor Beam")
 TARGETED_ACTIONS = ("Fire", "Ram", "Tractor Beam", "Scan for Weakness", "Targeting Solution")
+RANGE_LIMITED_ACTIONS = ("Targeting Solution", "Reveal", "Launch Probe")   # Long range max
 
 GENERATOR_PROFILES = {
     # profile -> (system modifiers, department weights)
@@ -1550,7 +1553,7 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
 
 
 def format_difficulty_hint(total, parts) -> str:
-    """Compact form for the Rule Hints, e.g.
+    """Compact form for the Rule Hint Card, e.g.
     'Base 2 + 1 (Failing breach: Engines) + 1 (GM Modifier) = Total Difficulty 4'."""
     if total is None:
         return "No task roll required."
@@ -1842,8 +1845,10 @@ class WeaponForm(ttk.Frame):
 
     CUSTOM = "(custom)"
 
-    def __init__(self, master, wraplength=470):
+    def __init__(self, master, wraplength=470, on_change=None):
         super().__init__(master)
+        self.on_change = on_change
+        self._baseline = None            # the weapon as loaded (None = empty new form)
         self._filling = False
         self._loading = False
         self._std_damage = None          # standard damage for the last calculator inputs
@@ -1980,9 +1985,16 @@ class WeaponForm(ttk.Frame):
                     xv.set(max(1, to_int(w.qualities.get(q, 1), 1)))
         finally:
             self._loading = False
+        self._baseline = self.current_weapon()
         self._show_selectors()
         self._last_key = self._selection_key()
         self._refresh_calc()
+
+    def is_pending(self) -> bool:
+        """True when the form holds a weapon that differs from what was loaded (a new
+        weapon that was filled in, or an edited weapon that was not saved back)."""
+        w = self.current_weapon()
+        return w is not None and w != self._baseline
 
     def set_ship_values(self, scale, weapons_rating):
         """The ship's Scale / Weapons rating changed in the creator: follow it."""
@@ -2094,6 +2106,11 @@ class WeaponForm(ttk.Frame):
     def _refresh_calc(self):
         if self._filling or self._loading or not hasattr(self, "q_vars"):
             return
+        self._update_calc_display()
+        if self.on_change:
+            self.on_change()
+
+    def _update_calc_display(self):
         rating = int_var_value(self.calc_weapons_var, self._ship_weapons)
         self.bonus_lbl.configure(
             text=f"Weapons System Damage Bonus: +{weapons_damage_bonus(rating)} "
@@ -2130,10 +2147,16 @@ class WeaponForm(ttk.Frame):
     # ------------------------------------------------------------ result
     def get_weapon(self):
         """The weapon described by the form, or None (after an error message)."""
-        name = self.name_var.get().strip()
-        if not name:
+        w = self.current_weapon()
+        if w is None:
             messagebox.showerror("Weapon", "The weapon needs a name (or pick a type in the "
                                            "Auto-Calculator).", parent=self.winfo_toplevel())
+        return w
+
+    def current_weapon(self):
+        """The weapon described by the form, or None when it has no name."""
+        name = self.name_var.get().strip()
+        if not name:
             return None
         wtype = self.type_var.get()
         etype, delivery, ttype = self._selection() if self.linked else ("", "", "")
@@ -2389,7 +2412,7 @@ class ShipCreator:
         ff.columnconfigure(0, weight=1)
         self.wform_lbl = ttk.Label(ff, text="", style="Bold.TLabel")
         self.wform_lbl.grid(row=0, column=0, sticky="w")
-        self.wform = WeaponForm(ff, wraplength=420)
+        self.wform = WeaponForm(ff, wraplength=420, on_change=self._show_dirty)
         self.wform.grid(row=1, column=0, sticky="ew")
         fbf = ttk.Frame(ff)
         fbf.grid(row=2, column=0, sticky="ew", pady=(6, 0))
@@ -2403,9 +2426,38 @@ class ShipCreator:
     # ------------------------------------------------------------ state
     def _set_dirty(self, dirty):
         self.dirty = dirty
-        self.dirty_lbl.configure(text="\u25cf unsaved edits" if dirty else "")
+        self._show_dirty()
+
+    def weapon_pending(self) -> bool:
+        return hasattr(self, "wform") and self.wform.is_pending()
+
+    def has_unsaved(self) -> bool:
+        """Unsaved ship edits, or a weapon in the form that is not in the weapon list."""
+        return self.dirty or self.weapon_pending()
+
+    def _show_dirty(self):
+        if not hasattr(self, "dirty_lbl"):
+            return
+        pending = self.weapon_pending()
+        text = "\u25cf unsaved edits" if self.dirty else ""
+        if pending:
+            text += (" + " if text else "\u25cf ") + "weapon form not added / updated"
+        self.dirty_lbl.configure(text=text)
         if self.on_dirty:
-            self.on_dirty(dirty)
+            self.on_dirty(self.dirty or pending)
+
+    def commit_pending_weapon(self) -> bool:
+        """Add (or, for a selected weapon, update) the weapon in the form."""
+        if self._selected_index() is not None:
+            return self.update_weapon()
+        return self.add_weapon()
+
+    def detach(self):
+        """The roster was replaced: keep the unsaved edits as a new, unlinked ship."""
+        old = self.editing_name
+        self.editing_name = None
+        self.mode_lbl.configure(text=f"Unsaved copy of {old} - Save adds it as a new ship")
+        self.save_btn.configure(text="Save to Roster")
 
     def _on_field_change(self):
         if self._loading:
@@ -2467,7 +2519,7 @@ class ShipCreator:
         self._set_dirty(as_new)
 
     def _new_blank_clicked(self):
-        if not self.dirty or self.confirm("Ship Creator", "Discard the unsaved edits?"):
+        if not self.has_unsaved() or self.confirm("Ship Creator", "Discard the unsaved edits?"):
             self.new_blank()
 
     def new_blank(self):
@@ -2547,7 +2599,9 @@ class ShipCreator:
 
     def _selected_index(self):
         sel = self.tree.selection()
-        return int(sel[0]) if sel else None
+        if sel and sel[0].isdigit() and int(sel[0]) < len(self.weapons):
+            return int(sel[0])
+        return None
 
     def _on_weapon_select(self):
         idx = self._selected_index()
@@ -2567,26 +2621,30 @@ class ShipCreator:
                                       "fill the fields in")
         set_enabled(self.update_weapon_btn, False)
 
-    def add_weapon(self):
+    def add_weapon(self) -> bool:
         w = self.wform.get_weapon()
         if w is None:
-            return
+            return False
         self.weapons.append(w)
         self._refresh_tree()
         self._set_dirty(True)
         self.clear_weapon_form()
+        return True
 
-    def update_weapon(self):
+    def update_weapon(self) -> bool:
         idx = self._selected_index()
         if idx is None:
-            return
+            return False
         w = self.wform.get_weapon()
         if w is None:
-            return
+            return False
         self.weapons[idx] = w
         self._refresh_tree(select=idx)
+        ctx = self.weapon_context()
+        self.wform.load(w, ctx["scale"], ctx["weapons_rating"])
         self.wform_lbl.configure(text=f"Editing weapon: {w.name}")
         self._set_dirty(True)
+        return True
 
     def remove_weapon(self):
         idx = self._selected_index()
@@ -2647,7 +2705,7 @@ class ShipCreator:
         for w, dmg in chosen:
             w.damage = dmg
         if chosen:
-            self._refresh_tree()
+            self._refresh_tree(select=self._selected_index())
             self._set_dirty(True)
 
 
@@ -3001,18 +3059,19 @@ class CombatHelperApp:
         tf.columnconfigure(0, weight=1)
         self.tgt_name_lbl = ttk.Label(tf, text="-", style="Header.TLabel")
         self.tgt_name_lbl.grid(row=0, column=0, sticky="w")
-        self.tgt_info_lbl = ttk.Label(tf, text="", style="Info.TLabel", wraplength=370)
-        self.tgt_info_lbl.grid(row=1, column=0, sticky="w")
         self.tgt_bar = ShieldBar(tf)
-        self.tgt_bar.grid(row=2, column=0, sticky="ew", pady=3)
-        self.tgt_res_lbl = ttk.Label(tf, text="", style="Bold.TLabel")
-        self.tgt_res_lbl.grid(row=3, column=0, sticky="w")
+        self.tgt_bar.grid(row=1, column=0, sticky="ew", pady=3)
+        self.tgt_res_lbl = ttk.Label(tf, text="", style="Bold.TLabel", wraplength=370,
+                                     justify="left")
+        self.tgt_res_lbl.grid(row=3, column=0, sticky="w", pady=(3, 0))
         self.tgt_breach_lbl = ttk.Label(tf, text="", wraplength=370, justify="left")
         self.tgt_breach_lbl.grid(row=4, column=0, sticky="w")
         self.tgt_fx_lbl = ttk.Label(tf, text="", wraplength=370, justify="left")
         self.tgt_fx_lbl.grid(row=5, column=0, sticky="w")
+        self.tgt_info_lbl = ttk.Label(tf, text="", style="Info.TLabel", wraplength=370)
+        self.tgt_info_lbl.grid(row=6, column=0, sticky="w")
         shf = ttk.Frame(tf)
-        shf.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        shf.grid(row=2, column=0, sticky="w")
         ttk.Label(shf, text="Shields:").pack(side="left")
         ttk.Button(shf, text="-1", width=3, style="Small.TButton",
                    command=lambda: self.adjust_target_shields(-1)).pack(side="left", padx=1)
@@ -3393,7 +3452,7 @@ class CombatHelperApp:
             self.vpane.update_idletasks()
             height = self.vpane.winfo_height()
             if height > 1:
-                self.vpane.sashpos(0, max(300, height - 150))
+                self.vpane.sashpos(0, max(300, height - 130))
         except tk.TclError:
             pass
 
@@ -3932,7 +3991,7 @@ class CombatHelperApp:
         a_val, d_val = s.crew_ratings()
         self.active_info_lbl.configure(
             text=f"{s.ship_class or 'Unknown class'} | {s.side} | Scale {s.scale} | "
-                 f"Crew {s.crew_quality} ({a_val}/{d_val})")
+                 f"{s.crew_quality} crew ({a_val}/{d_val})")
         self.active_bar.set_value(s.shields, s.max_shields)
         self.active_status_lbl.configure(text=self._ship_status_text(s))
         set_enabled(self.atk_reserve_cb, True)
@@ -3961,6 +4020,11 @@ class CombatHelperApp:
                      f"  (Scale <= {s.max_small_craft_scale})")
         else:
             self.small_craft_lbl.configure(text="Small Craft Readiness: n/a")
+        for w in (self.small_craft_lbl, self.small_craft_minus, self.small_craft_plus):
+            if s.small_craft_readiness:
+                w.grid()
+            else:
+                w.grid_remove()
         set_enabled(self.small_craft_minus, s.small_craft_readiness > 0)
         set_enabled(self.small_craft_plus, s.small_craft_readiness > 0)
         over = s.turns_used > s.scale
@@ -3968,10 +4032,9 @@ class CombatHelperApp:
                                       + ("  - OVER SCALE LIMIT!" if over else ""),
                                  style="Alert.TLabel" if s.turns_used >= s.scale else "Bold.TLabel")
         self.turns_bar.configure(maximum=max(1, s.scale), value=min(s.turns_used, s.scale))
-        info = "Systems used this round: " + (", ".join(s.systems_used) if s.systems_used
-                                              else "none")
-        info += ("  (re-use costs 1 Threat" + (", NPC spends it)" if s.side == "NPC"
-                                               else ", added to the pool)"))
+        info = "Systems used: " + (", ".join(SYSTEM_ABBR.get(x, x) for x in s.systems_used)
+                                   if s.systems_used else "none")
+        info += "  (re-use: 1 Threat" + (", NPC spends)" if s.side == "NPC" else " added)")
         if s.brace_for_impact:
             info += "\nBRACE FOR IMPACT: no Major Action on the next turn."
         self.turns_info_lbl.configure(text=info)
@@ -4016,7 +4079,8 @@ class CombatHelperApp:
         self._show_param_rows({
             "weapon": is_fire,
             "salvo": is_fire and weapon is not None and weapon.wtype == "Torpedo",
-            "range": bool(adef["attack"] or adef["range_penalty"] or name in TARGETED_ACTIONS),
+            "range": bool(adef["attack"] or adef["range_penalty"] or name in TARGETED_ACTIONS
+                          or name in RANGE_LIMITED_ACTIONS),
             "tsol": is_fire and (tsol or fts),
             "scan": name == "Scan for Weakness",
             "regen": name == "Regenerate Shields",
@@ -4164,7 +4228,7 @@ class CombatHelperApp:
                           f"crit on {max(1, dv)} or less", "key"))
                 if ship.breaches.get(s_sys) and not ship.breach_condition(s_sys):
                     L.append((f"  ! {s_sys} has {ship.breaches[s_sys]} breach(es) but no Nature "
-                              "of Breach - set it in the Breach Tracker.", "warn"))
+                              "of Breach - set it in the Breach Manager.", "warn"))
             else:
                 L.append((f"Ship Assist: {s_sys} + {s_dept}", "key"))
         else:
@@ -4199,7 +4263,8 @@ class CombatHelperApp:
                     L.append((f"Cost: torpedo {who} {cost} Threat"
                               + (" (Salvo)" if self.salvo_var.get() else ""), "warn"))
             elif ship:
-                L.append((f"! {ship.name} has no weapons - add some in the ship editor.", "warn"))
+                L.append((f"! {ship.name} has no weapons - add some in the Ship Creator.",
+                          "warn"))
         if name == "Direct":
             L.append(("Cost: 1 Momentum (NPC: 1 Threat).", "warn"))
         if name in ("Create Trait", "Create / Alter Trait"):
@@ -4239,7 +4304,7 @@ class CombatHelperApp:
                               f"({weapon.range}).")
             if name in ("Ram", "Tractor Beam") and range_penalty(self.range_var.get()) > 0:
                 alerts.append(f"{name} requires the target within Close range.")
-            if name in ("Targeting Solution", "Reveal", "Launch Probe") and \
+            if name in RANGE_LIMITED_ACTIONS and \
                     self.range_var.get() == "Extreme":
                 alerts.append(f"{name} works only within Long range.")
             if adef["attack"] and ship.evasive:
@@ -4349,8 +4414,8 @@ class CombatHelperApp:
                      f"Crew {t.crew_quality} ({a}/{d}) | Turns {t.turns_used}/{t.scale}")
             self.tgt_bar.set_value(t.shields, t.max_shields)
             self.tgt_res_lbl.configure(
-                text=f"Resistance: {t.resistance_text()}\nShaken thresholds: "
-                     f"<{t.max_shields * 0.5:g} / <{t.max_shields * 0.25:g}")
+                text=f"Resistance {t.resistance_text()}  |  Shaken <{t.max_shields * 0.5:g} / "
+                     f"<{t.max_shields * 0.25:g}")
             fx = t.active_effects()
             self.tgt_fx_lbl.configure(text="Effects: " + (", ".join(fx) if fx else "none"),
                                       style="Alert.TLabel" if t.shaken else "TLabel")
@@ -4453,7 +4518,7 @@ class CombatHelperApp:
                                     "targeted."))
                     tag = "warn"
                 else:
-                    text = "Not engaged. Use Engage Cloak in Active Ship Status."
+                    text = "Not engaged. Use Engage Cloak in the Active Attacker card."
             elif t == "Extensive Shuttlebays":
                 text = (f"Small Craft Readiness {ship.small_craft_readiness} (Scale - 1); "
                         "can support Scale 2 craft such as runabouts.")
@@ -4491,7 +4556,7 @@ class CombatHelperApp:
                         if aw is not None and aw.wtype == "Torpedo":
                             tag = "warn"
                 else:
-                    text = "Inactive (toggle in Target Status)."
+                    text = "Inactive (toggle in Target Quick Status)."
             else:
                 text = talent_text(t)
             kind = " [Special Rule]" if talent_kind(t) == SPECIAL_RULE else ""
@@ -4681,7 +4746,7 @@ class CombatHelperApp:
         weapon = self.selected_weapon() if name == "Fire" else None
         if name == "Fire" and weapon is None:
             self.show_error("No weapon", f"{ship.name} has no weapon selected. Add weapons in "
-                                         "the ship editor.")
+                                         "the Ship Creator tab.")
             return
         reaction = (adef["kind"] == "Major" and bool(ship.readied_action)
                     and name not in ("Ready", "Pass") and self.ask_yes_no(
@@ -4780,7 +4845,7 @@ class CombatHelperApp:
                 "Out of range", f"{name} requires the target within Close range (currently "
                                 f"{band}).\n\nProceed anyway?"):
             return None
-        if name in ("Targeting Solution", "Reveal", "Launch Probe") and band == "Extreme" and \
+        if name in RANGE_LIMITED_ACTIONS and band == "Extreme" and \
                 not self.ask_yes_no("Out of range", f"{name} works within Long range.\n\n"
                                                     "Proceed anyway?"):
             return None
@@ -5371,7 +5436,8 @@ class CombatHelperApp:
                  + (" (Piercing)" if piercing else "")
                  + ". Resolve it with APPLY DAMAGE.", "success")
         self.result_lbl.configure(text=self.result_lbl.cget("text")
-                                  + "\nAttack HITS - resolve damage in the Tactical panel.")
+                                  + "\nAttack HITS - resolve damage in Step 3 (Tactical "
+                                    "Combat Resolver).")
 
     def _choose_area_or_spread(self, ship, weapon):
         """Arrays: ask which quality this attack uses. Returns the resolved weapon copy,
@@ -5732,7 +5798,7 @@ class CombatHelperApp:
     def roll_system_hit_clicked(self):
         roll, sysname = roll_system_hit(self.rng, self.hit_table)
         self.last_system_hit = sysname
-        self.log(f"System Hit Generator (d{self.hit_table[-1][1]}): {roll} -> {sysname}.")
+        self.log(f"System Hit Roller (d{self.hit_table[-1][1]}): {roll} -> {sysname}.")
         self.refresh_all()
 
     def breach_last_hit(self):
@@ -5740,7 +5806,7 @@ class CombatHelperApp:
         if t is None or not self.last_system_hit:
             self.show_error("System hit", "Select a target and roll a system hit first.")
             return
-        self._add_breach(t, self.last_system_hit, 1, "System Hit Generator")
+        self._add_breach(t, self.last_system_hit, 1, "System Hit Roller")
         self.changed()
 
     def adjust_breach(self, sysname, delta):
@@ -5899,7 +5965,7 @@ class CombatHelperApp:
     # ========================================================= roster editing
     def _creator_may_replace(self) -> bool:
         """The Ship Creator holds unsaved edits: ask before loading something else."""
-        return not self.creator.dirty or self.ask_yes_no(
+        return not self.creator.has_unsaved() or self.ask_yes_no(
             "Ship Creator", "The Ship Creator has unsaved edits"
             + (f" to {self.creator.editing_name}" if self.creator.editing_name else "")
             + ".\n\nDiscard them?")
@@ -5930,6 +5996,22 @@ class CombatHelperApp:
         if ship is not None and self._creator_may_replace():
             self.creator.load_ship(ship)
 
+    def _sync_creator_after_roster_change(self):
+        """Load Roster / Reset: the creator must not keep editing a ship that was replaced."""
+        ed = self.creator
+        if ed.editing_name is None:
+            return
+        name = ed.editing_name
+        ship = self.ship_by_name(name)
+        if ed.has_unsaved():
+            ed.detach()
+            self.log(f"Ship Creator: the roster was replaced - your unsaved edits to {name} are "
+                     "kept as a new ship (Save adds it).", "alert")
+        elif ship is not None:
+            ed.load_ship(ship)
+        else:
+            ed.new_blank()
+
     def _refresh_creator_picker(self):
         names = [s.name for s in self.ships]
         self.creator_pick_cb.configure(values=names)
@@ -5943,6 +6025,22 @@ class CombatHelperApp:
         if not name:
             self.show_error("Ship Creator", "The ship needs a name.")
             return
+        if ed.weapon_pending():
+            selected = ed._selected_index() is not None
+            wname = ed.wform.name_var.get().strip()
+            ans = self.ask_yes_no_cancel(
+                "Weapon form", f"The weapon form holds '{wname}', which is not "
+                               + ("saved to" if selected else "added to")
+                               + " the ship's weapon list.\n\nYes = "
+                               + ("update" if selected else "add")
+                               + " it first\nNo = save the ship without it\nCancel = go back")
+            if ans is None:
+                return
+            if ans:
+                if not ed.commit_pending_weapon():
+                    return
+            else:
+                ed.clear_weapon_form()
         target = None
         if ed.editing_name and not as_new:
             target = self.ship_by_name(ed.editing_name)
@@ -5990,7 +6088,7 @@ class CombatHelperApp:
     def delete_ship(self):
         ship = self.selected_roster_ship()
         if ship is None:
-            self.show_info("Delete", "Select a ship in the roster list first.")
+            self.show_info("Delete", "Select a ship in the Fleet & Roster table first.")
             return
         if not self.ask_yes_no("Delete ship", f"Remove {ship.name} from the roster?"):
             return
@@ -6115,6 +6213,7 @@ class CombatHelperApp:
         self._last_attacker = None
         self.dirty = os.path.abspath(path) != os.path.abspath(self.data_file)
         self.log(f"Roster loaded from {path}: {len(self.ships)} ships, round {self.round}.")
+        self._sync_creator_after_roster_change()
         for err in errors:
             self.log(f"Skipped invalid ship ({err}).", "alert")
         self.refresh_all()
@@ -6147,6 +6246,8 @@ class CombatHelperApp:
         self._last_attacker = None
         self.dirty = False
         self.log("Preset ships loaded: USS Aurora, D'Deridex Warbird.")
+        if hasattr(self, "creator"):
+            self._sync_creator_after_roster_change()
         self.refresh_all()
 
     def _confirm_discard(self) -> bool:
@@ -6229,7 +6330,7 @@ class CombatHelperApp:
             self.refresh_all()
 
     def on_close(self):
-        if self.creator.dirty and not self.ask_yes_no(
+        if self.creator.has_unsaved() and not self.ask_yes_no(
                 "Ship Creator", "The Ship Creator has unsaved edits that are not in the roster."
                                 "\n\nDiscard them and exit?"):
             return
