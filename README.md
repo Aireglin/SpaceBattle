@@ -70,6 +70,81 @@ rules multi-select**. You can also add custom talents there, which show up as
 reminders. A live line shows the effective Shields, Resistance, Tractor and Small
 Craft values once talents are applied.
 
+## Weapon Auto-Calculator
+
+*Add Weapon…* and *Edit…* in the ship editor open the weapon dialog. Its
+**Auto-Calculate Weapon Stats** section fills in the standard stats from the Core
+Rulebook weapon tables (pp. 228–230).
+
+* **Energy weapons** take two selectors, **Energy Type** and **Delivery Method**:
+
+  | Delivery Method | Range | Damage | Qualities |
+  |---|---|---|---|
+  | Cannon | Close | Scale + 2 | – |
+  | Banks | Medium | Scale + 1 | – |
+  | Arrays | Medium | Scale | Area or Spread |
+  | Spinal Lance | Long | Scale + 3 | Cumbersome |
+
+  | Energy Type | Qualities |
+  |---|---|
+  | Antiproton Beam | High Yield |
+  | Disruptor | Intense |
+  | Electromagnetic / Ionic | Dampening, Piercing |
+  | Free Electron Laser | – |
+  | Graviton Beam | Devastating, Piercing |
+  | Phase / Pulse | Versatile 1 |
+  | Phased Polaron Beam | Intense, Piercing |
+  | Phaser | Versatile 2 |
+  | Proton Beam | Persistent |
+  | Tetryon Beam | Depleting |
+
+  Once both are picked, the dialog fills in the name (e.g. *Phaser Arrays*,
+  *Disruptor Spinal Lance*), the range, the damage and the merged qualities from both
+  tables. For example, Phaser Arrays get *Versatile 2, Area or Spread*.
+* **Torpedoes** use one **Torpedo Type** selector:
+
+  | Torpedo | Range | Damage | Qualities |
+  |---|---|---|---|
+  | Chroniton | Long | 3 | Calibration, Slowing |
+  | Gravimetric | Long | 5 | Calibration, Cumbersome, High Yield, Piercing |
+  | Neutronic | Long | 4 | Calibration, Dampening |
+  | Nuclear | Medium | 3 | Calibration, Intense |
+  | Photon | Long | 3 | High Yield |
+  | Photonic | Long | 2 | High Yield |
+  | Plasma | Long | 5 | Calibration, Cumbersome, Persistent |
+  | Polaron | Long | 3 | Calibration, Piercing |
+  | Positron | Long | 5 | Calibration, Cumbersome, Dampening |
+  | Quantum | Long | 4 | Calibration, High Yield, Intense |
+  | Spatial | Medium | 2 | – |
+  | Tetryonic | Long | 2 | Depleting, High Yield |
+  | Transphasic | Long | 4 | Calibration, Devastating, Piercing |
+  | Tricobalt | Long | 6 | Area, Calibration, Cumbersome |
+
+* **Weapons System Damage Bonus:** the dialog takes the ship's Scale and Weapons
+  rating from the editor (you can change them for a what-if) and shows the bonus:
+  Weapons ≤6 +0, 7–8 +1, 9–10 +2, 11–12 +3, 13+ +4. The bonus is added to the Damage
+  rating by default, because the app treats a weapon's Damage as its full rating. A
+  checkbox turns this off. The breakdown reads like
+  `Scale 5 + 0 (Arrays) + 3 (Weapons 11 bonus) = Damage 8`.
+* **Everything stays editable:** name, damage, range and every quality. A status
+  line shows whether the weapon still *matches the standard values* or is
+  *customised*, and what differs (e.g. `Damage 10 (standard 8); qualities edited`).
+  **Auto-Populate** re-applies the standard values at any time. With *Auto-fill when
+  a selection changes* ticked (the default), picking a type fills the fields
+  straight away. Changing Scale, Weapons or the bonus box only updates the damage.
+  Untick it to change the selectors without touching your fields.
+* When you edit an existing weapon, the selectors are pre-set from the weapon's
+  saved profile, or guessed from its name (*Photon Torpedoes* → Photon). Its values
+  are not changed until you ask.
+* The chosen Energy Type / Delivery Method / Torpedo Type is saved with the weapon in
+  the roster file. **Recalc Damage** in the ship editor updates the damage of all
+  linked weapons after a Scale or Weapons change, after you confirm. Range, name and
+  qualities stay as they are, and unlinked weapons are listed but left alone.
+* **Area or Spread** (Arrays): when the weapon hits, the app asks which of the two
+  this attack uses. Spread makes the Devastating Attack cost 1. If you skip the
+  question, it is asked again when damage is applied. The ship's weapon keeps *Area
+  or Spread* for the next attack.
+
 ## Starship talents and special rules
 
 | Talent / rule | What the app does |
@@ -221,6 +296,7 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   * Cumbersome, Piercing
   * Intense / Depleting (1 Momentum per +1 damage)
   * Spread (Devastating Attack costs 1)
+  * Area or Spread (the attacker picks one each time the weapon hits)
   * High Yield (+1 breach)
   * Devastating (+1 Damage Control Difficulty)
   * Dampening (drains Reserve Power)
@@ -251,8 +327,16 @@ defines a mechanic, the app follows the spec. The calls below are easy to change
   and adds one extra system hit / breach.
 * **Ram:** the suggested collision damage is the other ship's Scale, and you can
   edit it.
-* **Breaches** don't change task Difficulty automatically. You get an alert, and you
-  apply any penalty your table uses through the GM Modifier.
+* **Breaches:** the breach count alone doesn't change task Difficulty. The Nature of
+  Breach does: Primary Offline and Failing add +1 automatically (see above). Any other
+  penalty your table uses goes through the GM Modifier.
+* **Weapons System Damage Bonus bands** (≤6 +0, 7–8 +1, 9–10 +2, 11–12 +3, 13+ +4)
+  couldn't be checked online from this environment. They reproduce the preset
+  weapons exactly (Phaser Arrays 8, Disruptor Banks 9, Plasma Torpedoes 7). The bands
+  are one table, `WEAPONS_DAMAGE_BONUS_TABLE`, in `main.py`.
+* The **preset ships are unchanged**. The USS Aurora's Phaser Arrays keep both Area
+  and Spread, as before. A weapon built with the calculator gets *Area or Spread*
+  and asks at attack time instead.
 
 ## Tests
 

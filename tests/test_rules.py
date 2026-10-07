@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main  # noqa: E402
 from main import (  # noqa: E402
+    AREA_OR_SPREAD, ENERGY_DELIVERY_METHODS, ENERGY_TYPES, TORPEDO_TYPES, calculate_weapon,
+    format_weapon_calc, infer_weapon_profile, resolve_area_or_spread, weapons_damage_bonus,
     BRIDGE_STATIONS, CREW_QUALITY, Die, Ship, Weapon, bonus_damage_cost_each, bonus_dice_cost,
     compute_difficulty, devastating_attack_cost, evaluate_task, generate_npc_ship,
     minor_damage_lookup, outcome_from_successes, parse_roster_data, preset_ships,
@@ -593,6 +595,148 @@ class StationTests(unittest.TestCase):
         for station, n in (("Conn / Helm", "Impulse"), ("Tactical", "Fire"),
                            ("Sensor Operations", "Reveal"), ("Command", "Rally")):
             self.assertIn(n, BRIDGE_STATIONS[station])
+
+
+class WeaponCalculatorTests(unittest.TestCase):
+    """Auto-Calculate Weapon Stats (Core Rulebook pp. 228-230)."""
+
+    def test_weapons_damage_bonus_bands(self):
+        expected = {1: 0, 6: 0, 7: 1, 8: 1, 9: 2, 10: 2, 11: 3, 12: 3, 13: 4, 16: 4}
+        for rating, bonus in expected.items():
+            self.assertEqual(weapons_damage_bonus(rating), bonus, rating)
+        self.assertEqual(weapons_damage_bonus("junk"), 0)
+
+    def test_delivery_methods(self):
+        expected = {"Cannon": ("Close", 2), "Banks": ("Medium", 1), "Arrays": ("Medium", 0),
+                    "Spinal Lance": ("Long", 3)}
+        for delivery, (rng, plus) in expected.items():
+            w, parts = calculate_weapon("Energy", 4, 6, "Free Electron Laser", delivery)
+            self.assertEqual((w.range, w.damage), (rng, 4 + plus), delivery)
+            self.assertEqual(sum(v for _l, v in parts), w.damage)
+        self.assertEqual(ENERGY_DELIVERY_METHODS["Arrays"][2], {AREA_OR_SPREAD: 0})
+        self.assertEqual(ENERGY_DELIVERY_METHODS["Spinal Lance"][2], {"Cumbersome": 0})
+
+    def test_energy_type_qualities(self):
+        expected = {
+            "Antiproton Beam": {"High Yield"}, "Disruptor": {"Intense"},
+            "Electromagnetic / Ionic": {"Dampening", "Piercing"}, "Free Electron Laser": set(),
+            "Graviton Beam": {"Devastating", "Piercing"}, "Phase / Pulse": {"Versatile"},
+            "Phased Polaron Beam": {"Intense", "Piercing"}, "Phaser": {"Versatile"},
+            "Proton Beam": {"Persistent"}, "Tetryon Beam": {"Depleting"}}
+        self.assertEqual(set(ENERGY_TYPES), set(expected))
+        for etype, quals in expected.items():
+            self.assertEqual(set(ENERGY_TYPES[etype]), quals, etype)
+        self.assertEqual(ENERGY_TYPES["Phaser"]["Versatile"], 2)
+        self.assertEqual(ENERGY_TYPES["Phase / Pulse"]["Versatile"], 1)
+
+    def test_combined_examples(self):
+        w, parts = calculate_weapon("Energy", 5, 11, "Phaser", "Arrays")
+        self.assertEqual(w.name, "Phaser Arrays")
+        self.assertEqual((w.range, w.damage), ("Medium", 5 + 0 + 3))
+        self.assertEqual(w.qualities, {"Versatile": 2, AREA_OR_SPREAD: 0})
+        self.assertEqual(w.quality_text(), "Versatile 2, Area or Spread")
+        self.assertEqual(format_weapon_calc(parts),
+                         "Scale 5 + 0 (Arrays) + 3 (Weapons 11 bonus) = Damage 8")
+        w, _ = calculate_weapon("Energy", 6, 9, "Disruptor", "Spinal Lance")
+        self.assertEqual(w.name, "Disruptor Spinal Lance")
+        self.assertEqual((w.range, w.damage), ("Long", 6 + 3 + 2))
+        self.assertEqual(w.qualities, {"Intense": 0, "Cumbersome": 0})
+        self.assertEqual((w.energy_type, w.delivery, w.torpedo_type),
+                         ("Disruptor", "Spinal Lance", ""))
+
+    def test_bonus_can_be_left_out(self):
+        w, parts = calculate_weapon("Energy", 5, 11, "Phaser", "Cannon", include_bonus=False)
+        self.assertEqual(w.damage, 7)
+        self.assertEqual(len(parts), 2)
+
+    def test_torpedo_table(self):
+        expected = {
+            "Chroniton": ("Long", 3, {"Calibration", "Slowing"}),
+            "Gravimetric": ("Long", 5, {"Calibration", "Cumbersome", "High Yield", "Piercing"}),
+            "Neutronic": ("Long", 4, {"Calibration", "Dampening"}),
+            "Nuclear": ("Medium", 3, {"Calibration", "Intense"}),
+            "Photon": ("Long", 3, {"High Yield"}),
+            "Photonic": ("Long", 2, {"High Yield"}),
+            "Plasma": ("Long", 5, {"Calibration", "Cumbersome", "Persistent"}),
+            "Polaron": ("Long", 3, {"Calibration", "Piercing"}),
+            "Positron": ("Long", 5, {"Calibration", "Cumbersome", "Dampening"}),
+            "Quantum": ("Long", 4, {"Calibration", "High Yield", "Intense"}),
+            "Spatial": ("Medium", 2, set()),
+            "Tetryonic": ("Long", 2, {"Depleting", "High Yield"}),
+            "Transphasic": ("Long", 4, {"Calibration", "Devastating", "Piercing"}),
+            "Tricobalt": ("Long", 6, {"Area", "Calibration", "Cumbersome"}),
+        }
+        self.assertEqual(set(TORPEDO_TYPES), set(expected))
+        for ttype, (rng, dmg, quals) in expected.items():
+            w, _ = calculate_weapon("Torpedo", 5, 6, torpedo_type=ttype)   # bonus +0
+            self.assertEqual((w.name, w.wtype, w.range, w.damage, set(w.qualities)),
+                             (f"{ttype} Torpedoes", "Torpedo", rng, dmg, quals), ttype)
+        w, _ = calculate_weapon("Torpedo", 5, 13, torpedo_type="Photon")
+        self.assertEqual(w.damage, 3 + 4)
+
+    def test_every_calculated_quality_is_known(self):
+        for etype in ENERGY_TYPES:
+            for delivery in ENERGY_DELIVERY_METHODS:
+                w, _ = calculate_weapon("Energy", 4, 9, etype, delivery)
+                self.assertTrue(set(w.qualities) <= set(main.WEAPON_QUALITIES), w)
+                self.assertEqual(Weapon.from_dict(w.to_dict()), w)
+        for ttype in TORPEDO_TYPES:
+            w, _ = calculate_weapon("Torpedo", 4, 9, torpedo_type=ttype)
+            self.assertTrue(set(w.qualities) <= set(main.WEAPON_QUALITIES), w)
+            self.assertEqual(Weapon.from_dict(w.to_dict()), w)
+
+    def test_incomplete_selection(self):
+        self.assertEqual(calculate_weapon("Energy", 5, 9, "Phaser", ""), (None, []))
+        self.assertEqual(calculate_weapon("Energy", 5, 9, "", "Banks"), (None, []))
+        self.assertEqual(calculate_weapon("Torpedo", 5, 9, "Phaser", "Banks"), (None, []))
+        self.assertEqual(calculate_weapon("Torpedo", 5, 9, torpedo_type="Nope"), (None, []))
+
+    def test_presets_match_the_calculator(self):
+        aurora, warbird = preset_ships()
+        for ship, wname, args in ((aurora, "Phaser Arrays", ("Energy", "Phaser", "Arrays", "")),
+                                  (warbird, "Disruptor Banks",
+                                   ("Energy", "Disruptor", "Banks", "")),
+                                  (warbird, "Plasma Torpedoes", ("Torpedo", "", "", "Plasma"))):
+            std, _ = calculate_weapon(args[0], ship.scale, ship.systems["Weapons"], *args[1:])
+            self.assertEqual(std.damage, ship.weapon(wname).damage, wname)
+            self.assertEqual(std.range, ship.weapon(wname).range, wname)
+
+    def test_profile_persistence_and_sanitising(self):
+        w = Weapon.from_dict({"name": "X", "wtype": "Energy", "energy_type": "Phaser",
+                              "delivery": "Warp Core", "torpedo_type": "Photon"})
+        self.assertEqual((w.energy_type, w.delivery, w.torpedo_type), ("Phaser", "", ""))
+        w = Weapon.from_dict({"name": "T", "wtype": "Torpedo", "energy_type": "Phaser",
+                              "torpedo_type": "Quantum"})
+        self.assertEqual((w.energy_type, w.delivery, w.torpedo_type), ("", "", "Quantum"))
+        old = Weapon.from_dict({"name": "Old", "wtype": "Energy", "energy_type": None})
+        self.assertEqual((old.energy_type, old.delivery, old.torpedo_type), ("", "", ""))
+        ship = preset_ships()[0]
+        ship.weapons.append(calculate_weapon("Energy", 5, 11, "Phaser", "Cannon")[0])
+        clone = Ship.from_dict(ship.to_dict())
+        self.assertEqual(clone.weapons[-1].delivery, "Cannon")
+
+    def test_infer_profile_from_names(self):
+        self.assertEqual(infer_weapon_profile("Phaser Arrays", "Energy"), ("Phaser", "Arrays", ""))
+        self.assertEqual(infer_weapon_profile("Disruptor Banks", "Energy"),
+                         ("Disruptor", "Banks", ""))
+        self.assertEqual(infer_weapon_profile("Phased Polaron Beam", "Energy")[0],
+                         "Phased Polaron Beam")
+        self.assertEqual(infer_weapon_profile("Photon Torpedoes", "Torpedo"), ("", "", "Photon"))
+        self.assertEqual(infer_weapon_profile("Photonic Torpedo", "Torpedo"),
+                         ("", "", "Photonic"))
+        self.assertEqual(infer_weapon_profile("Torpedo Launchers", "Torpedo"), ("", "", ""))
+        self.assertEqual(infer_weapon_profile("Main Gun", "Energy"), ("", "", ""))
+
+    def test_area_or_spread_choice(self):
+        w, _ = calculate_weapon("Energy", 5, 11, "Phaser", "Arrays")
+        spread = resolve_area_or_spread(w, "Spread")
+        self.assertEqual(spread.qualities, {"Versatile": 2, "Spread": 0})
+        self.assertEqual(devastating_attack_cost(spread), 1)
+        area = resolve_area_or_spread(w, "Area")
+        self.assertTrue(area.has("Area") and not area.has("Spread"))
+        self.assertEqual(devastating_attack_cost(area), 2)
+        self.assertTrue(w.has(AREA_OR_SPREAD))            # original untouched
+        self.assertEqual(resolve_area_or_spread(w, None).qualities, w.qualities)
 
 
 if __name__ == "__main__":

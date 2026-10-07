@@ -25,6 +25,7 @@ import datetime
 import json
 import os
 import random
+import re
 import sys
 from dataclasses import asdict, dataclass, field, fields
 
@@ -138,6 +139,8 @@ DEFAULT_HIT_TABLE = "d12 (even)"
 WEAPON_QUALITIES = {
     "Area": (False, "Attack can also affect other vessels close to the target - resolve "
                     "extra targets per the rulebook."),
+    "Area or Spread": (False, "The attacker chooses Area or Spread each time the weapon hits "
+                              "(asked automatically)."),
     "Calibration": (False, "Weapon has calibration benefits - remember to apply them when "
                            "Calibrate Weapons / Targeting Solution was used."),
     "Cumbersome": (False, "+1 Difficulty to attacks with this weapon (auto-applied)."),
@@ -161,6 +164,71 @@ WEAPON_QUALITIES = {
     "Spread": (False, "Devastating Attack costs only 1 Momentum (auto-applied)."),
     "Versatile": (True, "On a successful attack, gain X bonus Momentum (NPC: Threat) "
                         "(auto-applied)."),
+}
+
+AREA_OR_SPREAD = "Area or Spread"
+
+# Weapon Auto-Calculator (STA 2e Core Rulebook pp. 228-230).
+# Energy weapons = Energy Type (qualities) + Delivery Method (range, damage, qualities).
+# Delivery Method -> (range, damage bonus added to the ship's Scale, intrinsic qualities)
+ENERGY_DELIVERY_METHODS = {
+    "Cannon": ("Close", 2, {}),
+    "Banks": ("Medium", 1, {}),
+    "Arrays": ("Medium", 0, {AREA_OR_SPREAD: 0}),
+    "Spinal Lance": ("Long", 3, {"Cumbersome": 0}),
+}
+# Energy Type -> intrinsic qualities (quality -> X value, 0 if none)
+ENERGY_TYPES = {
+    "Antiproton Beam": {"High Yield": 0},
+    "Disruptor": {"Intense": 0},
+    "Electromagnetic / Ionic": {"Dampening": 0, "Piercing": 0},
+    "Free Electron Laser": {},
+    "Graviton Beam": {"Devastating": 0, "Piercing": 0},
+    "Phase / Pulse": {"Versatile": 1},
+    "Phased Polaron Beam": {"Intense": 0, "Piercing": 0},
+    "Phaser": {"Versatile": 2},
+    "Proton Beam": {"Persistent": 0},
+    "Tetryon Beam": {"Depleting": 0},
+}
+# Torpedo Type -> (range, base damage, qualities)
+TORPEDO_TYPES = {
+    "Chroniton": ("Long", 3, {"Calibration": 0, "Slowing": 0}),
+    "Gravimetric": ("Long", 5, {"Calibration": 0, "Cumbersome": 0, "High Yield": 0,
+                                "Piercing": 0}),
+    "Neutronic": ("Long", 4, {"Calibration": 0, "Dampening": 0}),
+    "Nuclear": ("Medium", 3, {"Calibration": 0, "Intense": 0}),
+    "Photon": ("Long", 3, {"High Yield": 0}),
+    "Photonic": ("Long", 2, {"High Yield": 0}),
+    "Plasma": ("Long", 5, {"Calibration": 0, "Cumbersome": 0, "Persistent": 0}),
+    "Polaron": ("Long", 3, {"Calibration": 0, "Piercing": 0}),
+    "Positron": ("Long", 5, {"Calibration": 0, "Cumbersome": 0, "Dampening": 0}),
+    "Quantum": ("Long", 4, {"Calibration": 0, "High Yield": 0, "Intense": 0}),
+    "Spatial": ("Medium", 2, {}),
+    "Tetryonic": ("Long", 2, {"Depleting": 0, "High Yield": 0}),
+    "Transphasic": ("Long", 4, {"Calibration": 0, "Devastating": 0, "Piercing": 0}),
+    "Tricobalt": ("Long", 6, {"Area": 0, "Calibration": 0, "Cumbersome": 0}),
+}
+# Weapons System Damage Bonus: (highest Weapons rating, bonus); anything higher gets the max.
+WEAPONS_DAMAGE_BONUS_TABLE = ((6, 0), (8, 1), (10, 2), (12, 3))
+WEAPONS_DAMAGE_BONUS_MAX = 4
+# Words that identify a type in an existing weapon's name (used to pre-select the calculator).
+ENERGY_TYPE_ALIASES = {
+    "Antiproton Beam": ("antiproton",),
+    "Disruptor": ("disruptor", "disruptors"),
+    "Electromagnetic / Ionic": ("electromagnetic", "ionic", "ion"),
+    "Free Electron Laser": ("free electron", "laser", "lasers"),
+    "Graviton Beam": ("graviton",),
+    "Phase / Pulse": ("phase/pulse", "phase / pulse", "pulse", "phase"),
+    "Phased Polaron Beam": ("phased polaron", "polaron"),
+    "Phaser": ("phaser", "phasers"),
+    "Proton Beam": ("proton",),
+    "Tetryon Beam": ("tetryon",),
+}
+DELIVERY_ALIASES = {
+    "Cannon": ("cannon", "cannons"),
+    "Banks": ("bank", "banks"),
+    "Arrays": ("array", "arrays"),
+    "Spinal Lance": ("spinal lance", "lance"),
 }
 
 # Starship talents and special rules: name -> (kind, reminder text).
@@ -557,6 +625,10 @@ class Weapon:
     damage: int = 4
     range: str = "Medium"
     qualities: dict = field(default_factory=dict)   # quality -> X value (0 if none)
+    # Auto-Calculate profile the stats were based on ("" = custom weapon)
+    energy_type: str = ""
+    delivery: str = ""
+    torpedo_type: str = ""
 
     def has(self, quality: str) -> bool:
         return quality in self.qualities
@@ -588,14 +660,126 @@ class Weapon:
         quals = {str(k): (to_int(v, 0) if WEAPON_QUALITIES[k][0] else 0)
                  for k, v in quals.items() if k in WEAPON_QUALITIES}
         wtype = str(data.get("wtype", data.get("type", "Energy")))
+        wtype = wtype if wtype in WEAPON_TYPES else "Energy"
         rng = str(data.get("range", "Medium"))
+        etype, delivery, ttype = (str(data.get(k) or "") for k in
+                                  ("energy_type", "delivery", "torpedo_type"))
+        energy = wtype == "Energy"
         return cls(
             name=str(data.get("name", "Weapon")).strip() or "Weapon",
-            wtype=wtype if wtype in WEAPON_TYPES else "Energy",
+            wtype=wtype,
             damage=max(0, to_int(data.get("damage", 4), 4)),
             range=rng if rng in WEAPON_RANGES else "Medium",
             qualities=quals,
+            energy_type=etype if energy and etype in ENERGY_TYPES else "",
+            delivery=delivery if energy and delivery in ENERGY_DELIVERY_METHODS else "",
+            torpedo_type=ttype if not energy and ttype in TORPEDO_TYPES else "",
         )
+
+
+def weapons_damage_bonus(weapons_rating) -> int:
+    """Weapons System Damage Bonus (+0 to +4) for the ship's Weapons system rating."""
+    rating = to_int(weapons_rating, 0)
+    for highest, bonus in WEAPONS_DAMAGE_BONUS_TABLE:
+        if rating <= highest:
+            return bonus
+    return WEAPONS_DAMAGE_BONUS_MAX
+
+
+def merge_qualities(*sources) -> dict:
+    """Merge quality dicts in order; a quality present twice keeps the larger X value."""
+    merged = {}
+    for src in sources:
+        for q, v in src.items():
+            merged[q] = max(merged.get(q, 0), v)
+    return merged
+
+
+def energy_weapon_name(energy_type: str, delivery: str) -> str:
+    return f"{energy_type.replace(' / ', '/')} {delivery}"
+
+
+def torpedo_weapon_name(torpedo_type: str) -> str:
+    return f"{torpedo_type} Torpedoes"
+
+
+def calculate_weapon(wtype, scale, weapons_rating, energy_type="", delivery="", torpedo_type="",
+                     include_bonus=True):
+    """Standard weapon stats from the Core Rulebook tables.
+
+    Returns (Weapon, parts) where parts are (label, value) pairs that add up to the
+    damage, or (None, []) when the selection is incomplete for that weapon type."""
+    rating = to_int(weapons_rating, 0)
+    if wtype == "Energy":
+        if energy_type not in ENERGY_TYPES or delivery not in ENERGY_DELIVERY_METHODS:
+            return None, []
+        rng, delivery_bonus, delivery_q = ENERGY_DELIVERY_METHODS[delivery]
+        parts = [("Scale", max(1, to_int(scale, 1))), (delivery, delivery_bonus)]
+        quals = merge_qualities(ENERGY_TYPES[energy_type], delivery_q)
+        name = energy_weapon_name(energy_type, delivery)
+        profile = {"energy_type": energy_type, "delivery": delivery}
+    elif wtype == "Torpedo":
+        if torpedo_type not in TORPEDO_TYPES:
+            return None, []
+        rng, base, quals = TORPEDO_TYPES[torpedo_type]
+        parts = [(f"{torpedo_type} torpedo", base)]
+        quals = dict(quals)
+        name = torpedo_weapon_name(torpedo_type)
+        profile = {"torpedo_type": torpedo_type}
+    else:
+        return None, []
+    if include_bonus:
+        parts.append((f"Weapons {rating} bonus", weapons_damage_bonus(rating)))
+    damage = sum(v for _label, v in parts)
+    return Weapon(name, wtype, damage, rng, quals, **profile), parts
+
+
+def format_weapon_calc(parts) -> str:
+    """'Scale 5 + 0 (Arrays) + 3 (Weapons 11 bonus) = Damage 8'."""
+    if not parts:
+        return ""
+    label, value = parts[0]
+    text = f"{label} {value}"
+    for label, value in parts[1:]:
+        text += f" {'+' if value >= 0 else '-'} {abs(value)} ({label})"
+    return f"{text} = Damage {sum(v for _l, v in parts)}"
+
+
+def _alias_match(name: str, aliases: dict) -> str:
+    """The key whose longest alias appears as whole word(s) in `name` ("" if none)."""
+    low = name.lower()
+    best, best_len = "", 0
+    for key, words in aliases.items():
+        for word in words:
+            if len(word) > best_len and re.search(r"(?<![a-z])" + re.escape(word)
+                                                  + r"(?![a-z])", low):
+                best, best_len = key, len(word)
+    return best
+
+
+def infer_weapon_profile(name: str, wtype: str) -> tuple:
+    """Guess (energy_type, delivery, torpedo_type) from a weapon's name, e.g. for presets."""
+    if wtype == "Torpedo":
+        return "", "", _alias_match(name, {t: (t.lower(),) for t in TORPEDO_TYPES})
+    return _alias_match(name, ENERGY_TYPE_ALIASES), _alias_match(name, DELIVERY_ALIASES), ""
+
+
+def weapon_profile(weapon) -> tuple:
+    """The weapon's stored Auto-Calculate profile, or one inferred from its name."""
+    if weapon.energy_type or weapon.delivery or weapon.torpedo_type:
+        return weapon.energy_type, weapon.delivery, weapon.torpedo_type
+    return infer_weapon_profile(weapon.name, weapon.wtype)
+
+
+def resolve_area_or_spread(weapon, choice: str):
+    """Copy of `weapon` with 'Area or Spread' replaced by the attacker's choice."""
+    chosen = copy.deepcopy(weapon)
+    if chosen.has(AREA_OR_SPREAD) and choice in ("Area", "Spread"):
+        quals = {}
+        for q, v in chosen.qualities.items():
+            quals[choice if q == AREA_OR_SPREAD else q] = v
+        chosen.qualities = quals
+    return chosen
 
 
 @dataclass
@@ -1650,11 +1834,16 @@ class BreachNatureDialog(tk.Toplevel):
 
 
 class WeaponDialog(tk.Toplevel):
-    def __init__(self, parent, weapon=None):
+    """Add / edit a weapon, with the Core Rulebook Auto-Calculator (pp. 228-230)."""
+
+    CUSTOM = "(custom)"
+
+    def __init__(self, parent, weapon=None, scale=None, weapons_rating=None):
         super().__init__(parent)
         self.title("Weapon" if weapon is None else f"Edit Weapon - {weapon.name}")
         self.resizable(False, False)
         self.result = None
+        self._filling = False
         w = weapon or Weapon()
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -1669,13 +1858,14 @@ class WeaponDialog(tk.Toplevel):
         ttk.Combobox(frm, textvariable=self.type_var, values=WEAPON_TYPES, state="readonly",
                      width=10).grid(row=1, column=1, sticky="w", pady=2)
         ttk.Label(frm, text="Damage").grid(row=1, column=2, sticky="e", padx=(8, 2))
-        ttk.Spinbox(frm, from_=0, to=20, textvariable=self.dmg_var, width=5).grid(
+        ttk.Spinbox(frm, from_=0, to=30, textvariable=self.dmg_var, width=5).grid(
             row=1, column=3, sticky="w")
         ttk.Label(frm, text="Range").grid(row=2, column=0, sticky="w")
         ttk.Combobox(frm, textvariable=self.range_var, values=WEAPON_RANGES, state="readonly",
                      width=10).grid(row=2, column=1, sticky="w", pady=2)
-        qbox = ttk.LabelFrame(frm, text="Qualities", padding=6)
-        qbox.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self._build_calculator(frm, w, scale, weapons_rating)
+        qbox = ttk.LabelFrame(frm, text="Qualities (editable)", padding=6)
+        qbox.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.q_vars = {}
         for i, (q, (has_x, desc)) in enumerate(WEAPON_QUALITIES.items()):
             row, col = divmod(i, 2)
@@ -1689,27 +1879,196 @@ class WeaponDialog(tk.Toplevel):
                 ttk.Spinbox(cell, from_=1, to=9, textvariable=xv, width=3).pack(side="left", padx=2)
             self.q_vars[q] = (on, xv)
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        btns.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+
+        self.type_var.trace_add("write", lambda *_a: self._on_type_change())
+        for var in (self.calc_scale_var, self.calc_weapons_var, self.bonus_var):
+            var.trace_add("write", lambda *_a: self._on_ship_values_change())
+        watched = [self.dmg_var, self.range_var, self.name_var]
+        for on, xv in self.q_vars.values():
+            watched += [on] + ([xv] if xv is not None else [])
+        for var in watched:
+            var.trace_add("write", lambda *_a: self._refresh_calc())
+        self._show_selectors()
+        self._refresh_calc()
         make_modal(self, parent)
 
+    # ------------------------------------------------------------ calculator
+    def _build_calculator(self, frm, w, scale, weapons_rating):
+        calc = ttk.LabelFrame(frm, text="Auto-Calculate Weapon Stats (Core Rulebook pp. 228-230)",
+                              padding=6)
+        calc.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        etype, delivery, ttype = weapon_profile(w)
+        self.etype_var = tk.StringVar(value=etype or self.CUSTOM)
+        self.delivery_var = tk.StringVar(value=delivery or self.CUSTOM)
+        self.ttype_var = tk.StringVar(value=ttype or self.CUSTOM)
+        self.energy_row = ttk.Frame(calc)
+        ttk.Label(self.energy_row, text="Energy Type").pack(side="left")
+        ecb = ttk.Combobox(self.energy_row, textvariable=self.etype_var, state="readonly",
+                           values=[self.CUSTOM] + list(ENERGY_TYPES), width=22)
+        ecb.pack(side="left", padx=(4, 8))
+        ttk.Label(self.energy_row, text="+ Delivery Method").pack(side="left")
+        dcb = ttk.Combobox(self.energy_row, textvariable=self.delivery_var, state="readonly",
+                           values=[self.CUSTOM] + list(ENERGY_DELIVERY_METHODS), width=13)
+        dcb.pack(side="left", padx=(4, 0))
+        self.torp_row = ttk.Frame(calc)
+        ttk.Label(self.torp_row, text="Torpedo Type").pack(side="left")
+        tcb = ttk.Combobox(self.torp_row, textvariable=self.ttype_var, state="readonly",
+                           values=[self.CUSTOM] + list(TORPEDO_TYPES), width=14)
+        tcb.pack(side="left", padx=(4, 0))
+        for cb in (ecb, dcb, tcb):
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._on_selection())
+        self.energy_row.grid(row=0, column=0, sticky="w")
+        self.torp_row.grid(row=0, column=0, sticky="w")
+
+        ship_row = ttk.Frame(calc)
+        ship_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.calc_scale_var = tk.IntVar(value=clamp(to_int(scale, 4), 1, 10))
+        self.calc_weapons_var = tk.IntVar(value=clamp(to_int(weapons_rating, 8), 1, 16))
+        ttk.Label(ship_row, text="Ship Scale").pack(side="left")
+        ttk.Spinbox(ship_row, from_=1, to=10, textvariable=self.calc_scale_var,
+                    width=4).pack(side="left", padx=(4, 8))
+        ttk.Label(ship_row, text="Weapons").pack(side="left")
+        ttk.Spinbox(ship_row, from_=1, to=16, textvariable=self.calc_weapons_var,
+                    width=4).pack(side="left", padx=(4, 8))
+        self.bonus_lbl = ttk.Label(ship_row, text="", style="Bold.TLabel")
+        self.bonus_lbl.pack(side="left")
+        self.bonus_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(calc, text="Add the Weapons System Damage Bonus to the Damage rating",
+                        variable=self.bonus_var).grid(row=2, column=0, sticky="w")
+        self.calc_lbl = ttk.Label(calc, text="", style="Bold.TLabel", wraplength=470)
+        self.calc_lbl.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.calc_q_lbl = ttk.Label(calc, text="", wraplength=470)
+        self.calc_q_lbl.grid(row=4, column=0, sticky="w")
+        act = ttk.Frame(calc)
+        act.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(act, text="Auto-Populate", style="Accent.TButton",
+                   command=self.auto_populate).pack(side="left")
+        self.autofill_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(act, text="Auto-fill when a selection changes",
+                        variable=self.autofill_var).pack(side="left", padx=(8, 0))
+        self.calc_status_lbl = ttk.Label(calc, text="", wraplength=470)
+        self.calc_status_lbl.grid(row=6, column=0, sticky="w", pady=(2, 0))
+
+    def _selection(self):
+        def val(var):
+            v = var.get()
+            return "" if v == self.CUSTOM else v
+        return val(self.etype_var), val(self.delivery_var), val(self.ttype_var)
+
+    def standard(self):
+        """(Weapon, parts) for the current selection, or (None, []) if incomplete."""
+        etype, delivery, ttype = self._selection()
+        return calculate_weapon(self.type_var.get(), int_var_value(self.calc_scale_var, 4),
+                                int_var_value(self.calc_weapons_var, 8), etype, delivery, ttype,
+                                include_bonus=self.bonus_var.get())
+
+    def _show_selectors(self):
+        if self.type_var.get() == "Torpedo":
+            self.energy_row.grid_remove()
+            self.torp_row.grid()
+        else:
+            self.torp_row.grid_remove()
+            self.energy_row.grid()
+
+    def _on_type_change(self):
+        self._show_selectors()
+        self._on_selection()
+
+    def _on_selection(self):
+        if self.autofill_var.get() and self.standard()[0] is not None:
+            self.auto_populate()
+        else:
+            self._refresh_calc()
+
+    def _on_ship_values_change(self):
+        std = self.standard()[0]
+        if self.autofill_var.get() and std is not None:
+            self.dmg_var.set(std.damage)       # only the damage depends on Scale / Weapons
+        self._refresh_calc()
+
+    def auto_populate(self):
+        """(Re)apply the standard name, range, damage and qualities for the selection."""
+        std = self.standard()[0]
+        if std is None:
+            what = "a Torpedo Type" if self.type_var.get() == "Torpedo" else \
+                "an Energy Type and a Delivery Method"
+            self.calc_status_lbl.configure(text=f"Select {what} first.", style="Alert.TLabel")
+            return False
+        self._filling = True
+        try:
+            self.name_var.set(std.name)
+            self.range_var.set(std.range)
+            self.dmg_var.set(std.damage)
+            for q, (on, xv) in self.q_vars.items():
+                on.set(q in std.qualities)
+                if xv is not None and q in std.qualities:
+                    xv.set(max(1, std.qualities[q]))
+        finally:
+            self._filling = False
+        self._refresh_calc()
+        return True
+
+    def current_qualities(self) -> dict:
+        quals = {}
+        for q, (on, xv) in self.q_vars.items():
+            if on.get():
+                quals[q] = max(1, int_var_value(xv, 1)) if xv is not None else 0
+        return quals
+
+    def _refresh_calc(self):
+        if self._filling or not hasattr(self, "q_vars"):
+            return
+        rating = int_var_value(self.calc_weapons_var, 8)
+        self.bonus_lbl.configure(
+            text=f"\u2192 Weapons System Damage Bonus +{weapons_damage_bonus(rating)}")
+        std, parts = self.standard()
+        if std is None:
+            self.calc_lbl.configure(text="Standard: - (pick a type above, or keep a custom "
+                                         "weapon)")
+            self.calc_q_lbl.configure(text="")
+            self.calc_status_lbl.configure(text="Custom weapon - all fields are set by hand.",
+                                           style="Info.TLabel")
+            return
+        self.calc_lbl.configure(text=f"Standard {std.name}: {format_weapon_calc(parts)}, "
+                                     f"Range {std.range}")
+        self.calc_q_lbl.configure(text="Qualities: " + (std.quality_text() or "none"))
+        diffs = []
+        if int_var_value(self.dmg_var, -1) != std.damage:
+            diffs.append(f"Damage {int_var_value(self.dmg_var, 0)} (standard {std.damage})")
+        if self.range_var.get() != std.range:
+            diffs.append(f"Range {self.range_var.get()} (standard {std.range})")
+        if self.current_qualities() != std.qualities:
+            diffs.append("qualities edited")
+        if diffs:
+            self.calc_status_lbl.configure(
+                text="Customised: " + "; ".join(diffs) + ". Auto-Populate restores the "
+                     "standard values.", style="Alert.TLabel")
+        else:
+            self.calc_status_lbl.configure(text="\u2713 Matches the standard values.",
+                                           style="Good.TLabel")
+
+    # ------------------------------------------------------------ result
     def _ok(self):
         name = self.name_var.get().strip()
         if not name:
             messagebox.showerror("Weapon", "The weapon needs a name.", parent=self)
             return
-        quals = {}
-        for q, (on, xv) in self.q_vars.items():
-            if on.get():
-                quals[q] = max(1, int_var_value(xv, 1)) if xv is not None else 0
-        self.result = Weapon(name, self.type_var.get(), max(0, int_var_value(self.dmg_var, 0)),
-                             self.range_var.get(), quals)
+        wtype = self.type_var.get()
+        etype, delivery, ttype = self._selection()
+        energy = wtype == "Energy"
+        self.result = Weapon(name, wtype, max(0, int_var_value(self.dmg_var, 0)),
+                             self.range_var.get(), self.current_qualities(),
+                             energy_type=etype if energy else "",
+                             delivery=delivery if energy else "",
+                             torpedo_type=ttype if not energy else "")
         self.destroy()
 
     @classmethod
-    def ask(cls, parent, weapon=None):
-        dlg = cls(parent, weapon)
+    def ask(cls, parent, weapon=None, scale=None, weapons_rating=None):
+        dlg = cls(parent, weapon, scale, weapons_rating)
         parent.wait_window(dlg)
         return dlg.result
 
@@ -1893,6 +2252,8 @@ class ShipEditor(tk.Toplevel):
         ttk.Button(wf, text="Edit...", command=self._edit_weapon).grid(row=1, column=1, sticky="w")
         ttk.Button(wf, text="Remove", command=self._remove_weapon).grid(row=1, column=2,
                                                                         sticky="w")
+        ttk.Button(wf, text="Recalc Damage", command=self._recalc_weapons).grid(
+            row=1, column=3, sticky="e")
         wf.columnconfigure(3, weight=1)
 
         nf = ttk.LabelFrame(frm, text="Notes", padding=6)
@@ -1958,8 +2319,49 @@ class ShipEditor(tk.Toplevel):
         except tk.TclError:
             pass
 
+    def _weapon_context(self) -> dict:
+        """The editor's current (unsaved) Scale and Weapons rating for the calculator."""
+        return {"scale": clamp(int_var_value(self.scale_var, 4), 1, 10),
+                "weapons_rating": max(1, int_var_value(self.sys_vars["Weapons"], 8))}
+
+    def weapon_damage_updates(self) -> list:
+        """(weapon, new damage) for Auto-Calculated weapons whose damage differs from the
+        standard for the current Scale / Weapons rating (bonus included)."""
+        ctx = self._weapon_context()
+        out = []
+        for w in self.weapons:
+            std, _parts = calculate_weapon(w.wtype, ctx["scale"], ctx["weapons_rating"],
+                                           w.energy_type, w.delivery, w.torpedo_type)
+            if std is not None and std.damage != w.damage:
+                out.append((w, std.damage))
+        return out
+
+    def _recalc_weapons(self):
+        ctx = self._weapon_context()
+        updates = self.weapon_damage_updates()
+        linked = [w for w in self.weapons if w.energy_type or w.torpedo_type]
+        unlinked = [w.name for w in self.weapons if w not in linked]
+        note = ("\n\nNot linked to the calculator (left unchanged): " + ", ".join(unlinked)
+                + ".\nOpen them with Edit... and use Auto-Populate to link them."
+                if unlinked else "")
+        head = (f"Scale {ctx['scale']}, Weapons {ctx['weapons_rating']} (Weapons System "
+                f"Damage Bonus +{weapons_damage_bonus(ctx['weapons_rating'])})")
+        if not updates:
+            messagebox.showinfo("Recalc Damage", f"{head}:\nall calculator-linked weapons "
+                                "already have the standard damage." + note, parent=self)
+            self._regrab()
+            return
+        lines = "\n".join(f"  {w.name}: Damage {w.damage} \u2192 {dmg}" for w, dmg in updates)
+        if messagebox.askyesno("Recalc Damage", f"{head}:\n\n{lines}\n\nApply the standard "
+                               "damage? Ranges, names and qualities are kept." + note,
+                               parent=self):
+            for w, dmg in updates:
+                w.damage = dmg
+            self._refresh_tree()
+        self._regrab()
+
     def _add_weapon(self):
-        w = WeaponDialog.ask(self)
+        w = WeaponDialog.ask(self, **self._weapon_context())
         self._regrab()
         if w:
             self.weapons.append(w)
@@ -1969,7 +2371,7 @@ class ShipEditor(tk.Toplevel):
         idx = self._selected_index()
         if idx is None:
             return
-        w = WeaponDialog.ask(self, self.weapons[idx])
+        w = WeaponDialog.ask(self, self.weapons[idx], **self._weapon_context())
         self._regrab()
         if w:
             self.weapons[idx] = w
@@ -3665,8 +4067,10 @@ class CombatHelperApp:
         cost = bonus * each + (dev_cost if self.devastate_var.get() else 0)
         payer = "Threat" if self._damage_payer_is_npc() else "Momentum"
         self.dmg_cost_lbl.configure(text=f"{each} {payer} per +1  (total cost: {cost})")
-        self.devastate_cb.configure(text=f"Devastating Attack ({dev_cost} {payer}: +1 extra "
-                                         "system hit / breach)")
+        spread_note = (", 1 with Spread" if weapon is not None and weapon.has(AREA_OR_SPREAD)
+                       else "")
+        self.devastate_cb.configure(text=f"Devastating Attack ({dev_cost} {payer}{spread_note}: "
+                                         "+1 extra system hit / breach)")
         if t is None:
             self.dmg_preview_lbl.configure(text="Select a target.")
             return
@@ -4449,6 +4853,11 @@ class CombatHelperApp:
             "calibrate": calib, "scan_damage": 2 if scan == "damage" else 0,
             "rapid_fire": rapid, "choose_system": choose, "ram": name == "Ram",
         }
+        pw = self.pending_attack["weapon"]
+        if pw is not None and pw.has(AREA_OR_SPREAD):
+            chosen = self._choose_area_or_spread(ship, pw)
+            if chosen is not None:
+                self.pending_attack["weapon"] = chosen
         self.dmg_weapon_var.set(label)
         self.dmg_base_var.set(base)
         self.dmg_bonus_var.set(0)
@@ -4462,6 +4871,22 @@ class CombatHelperApp:
                  + ". Resolve it with APPLY DAMAGE.", "success")
         self.result_lbl.configure(text=self.result_lbl.cget("text")
                                   + "\nAttack HITS - resolve damage in the Tactical panel.")
+
+    def _choose_area_or_spread(self, ship, weapon):
+        """Arrays: ask which quality this attack uses. Returns the resolved weapon copy,
+        or None if the GM cancelled."""
+        choice = self.ask_choice(
+            "Area or Spread",
+            f"{weapon.name} has Area or Spread - choose one for this attack:\n\n"
+            f"Area: {WEAPON_QUALITIES['Area'][1]}\nSpread: {WEAPON_QUALITIES['Spread'][1]}",
+            ["Area", "Spread"], "Spread")
+        if choice not in ("Area", "Spread"):
+            self.log(f"{weapon.name}: Area or Spread not chosen yet - asked again when damage "
+                     "is applied.")
+            return None
+        who = f"{ship.name}'s " if ship is not None else ""
+        self.log(f"{who}{weapon.name} uses {choice} for this attack.")
+        return resolve_area_or_spread(weapon, choice)
 
     # ========================================================= damage logic
     def on_damage_weapon_change(self):
@@ -4512,6 +4937,12 @@ class CombatHelperApp:
         weapon = pa["weapon"] if pa else self._damage_weapon()
         if not pa and attacker is target:
             attacker = None   # e.g. GM applying hazard damage to the acting ship
+        if weapon is not None and weapon.has(AREA_OR_SPREAD):
+            weapon = self._choose_area_or_spread(attacker, weapon)
+            if weapon is None:
+                return
+            if pa:
+                pa["weapon"] = weapon
         bonus = int_var_value(self.dmg_bonus_var, 0)
         dev = self.devastate_var.get()
         raw = int_var_value(self.dmg_base_var, 0) + pending_damage_bonus(pa) + bonus
@@ -5233,6 +5664,27 @@ class CombatHelperApp:
         txt.insert("end", "\nWeapon Qualities\n", "h")
         for q, (has_x, desc) in WEAPON_QUALITIES.items():
             txt.insert("end", f"  {q}{' X' if has_x else ''}: {desc}\n")
+        txt.insert("end", "\nWeapon Auto-Calculator (Core Rulebook pp. 228-230)\n", "h")
+        txt.insert("end", "  Energy weapon = Energy Type + Delivery Method; Damage = Scale + "
+                          "delivery bonus + Weapons System Damage Bonus.\n")
+        for name, (rng, bonus, quals) in ENERGY_DELIVERY_METHODS.items():
+            q = ", ".join(quals) or "-"
+            txt.insert("end", f"  {name}: Range {rng}, Damage Scale + {bonus}; {q}\n")
+        for name, quals in ENERGY_TYPES.items():
+            q = Weapon(qualities=quals).quality_text() or "-"
+            txt.insert("end", f"  {name}: {q}\n")
+        txt.insert("end", "  Torpedoes (Damage = listed + Weapons System Damage Bonus):\n")
+        for name, (rng, dmg, quals) in TORPEDO_TYPES.items():
+            q = ", ".join(quals) or "-"
+            txt.insert("end", f"  {name}: Range {rng}, Damage {dmg}; {q}\n")
+        prev = 0
+        bands = []
+        for highest, bonus in WEAPONS_DAMAGE_BONUS_TABLE:
+            bands.append(f"{prev + 1}-{highest}: +{bonus}" if prev else f"<={highest}: +{bonus}")
+            prev = highest
+        bands.append(f"{prev + 1}+: +{WEAPONS_DAMAGE_BONUS_MAX}")
+        txt.insert("end", "  Weapons System Damage Bonus by Weapons rating: "
+                          + ", ".join(bands) + "\n")
         txt.insert("end", "\nStarship Talents & Special Rules\n", "h")
         for t, (kind, desc) in STARSHIP_TALENTS.items():
             txt.insert("end", f"  {t}{' (Special Rule)' if kind == SPECIAL_RULE else ''}: "
