@@ -253,12 +253,17 @@ STARSHIP_TALENTS = {
                                        "of 1d20 (not while Sensors has breaches)."),
     "Point Defense System": (TALENT, "While active, torpedo attacks against this ship face Cover: "
                                      "+1 Difficulty (auto-applied)."),
-    "Secondary Reactors": (TALENT, "Once per scene, when the ship uses Reroute Power, spend 2 "
-                                   "Momentum (Immediate) to restore its Reserve Power "
-                                   "(contextual button / prompt)."),
-    "Backup EPS Conduits": (TALENT, "Redundant power conduits: reminder during Reroute Power and "
-                                    "when the ship loses power (Losing Power!) - apply the "
-                                    "talent's text (GM ruling)."),
+    "Secondary Reactors": (TALENT, "Once per scene, during Reroute Power, spend 2 Momentum "
+                                   "(Immediate) to restore the ship's Reserve Power right away "
+                                   "(prompt / button)."),
+    "Backup EPS Conduits": (TALENT, "When 'Losing Power!' (Shaken) would drain the Reserve "
+                                    "Power, roll 1d20: on the Structure rating or less the ship "
+                                    "keeps its Reserve Power (prompted)."),
+    "I'm Giving It All She's Got!": (TALENT, "Once per scene, while the ship has no Reserve "
+                                             "Power, add 2 Threat (NPC: spend 2 Threat) to "
+                                             "regain it (button / prompt)."),
+    "Improved Power Systems": (TALENT, "Regain Power is 1 Difficulty lower (minimum 1, "
+                                       "auto-applied)."),
     "Rugged Design": (TALENT, "Breach repairs: re-roll 1d20 on Damage Control (auto-roll "
                               "re-rolls a failed die); on success you may spend 2 Momentum to "
                               "patch a second breach (contextual prompt)."),
@@ -570,6 +575,9 @@ BRIDGE_STATIONS = {
 HOSTILE_ACTIONS = ("Fire", "Ram", "Tractor Beam")
 TARGETED_ACTIONS = ("Fire", "Ram", "Tractor Beam", "Scan for Weakness", "Targeting Solution")
 RANGE_LIMITED_ACTIONS = ("Targeting Solution", "Reveal", "Launch Probe")   # Long range max
+GIVING_IT_ALL = "I'm Giving It All She's Got!"
+GIVING_IT_ALL_COST = 2         # Threat
+NO_RESERVE_WARNING = "\u26a0 Requires Reserve Power! (Currently Expended)"
 
 GENERATOR_PROFILES = {
     # profile -> (system modifiers, department weights)
@@ -829,7 +837,9 @@ class Ship:
     calibrated_sensors: bool = False
     weakness_scanned: str = ""          # "", "damage" or "piercing"
     brace_for_impact: bool = False
-    regain_power_penalty: int = 0
+    regain_power_penalty: int = 0     # 'Losing Power!': +1 each to the next Regain Power
+    regain_power_attempts: int = 0    # Regain Power attempts this scene (+1 Difficulty each)
+    giving_it_all_used: bool = False  # I'm Giving It All She's Got! (once per scene)
     # --- per-round state (reset by End Round) ------------------------------
     turns_used: int = 0
     systems_used: list = field(default_factory=list)
@@ -938,8 +948,27 @@ class Ship:
         return (self.breach_condition(system) == "Malfunctioning"
                 and system not in self.restored_systems)
 
+    @property
+    def has_reserve_power(self) -> bool:
+        """Reserve Power is a once-per-scene resource (stored as `reserve_power`)."""
+        return self.reserve_power
+
+    @has_reserve_power.setter
+    def has_reserve_power(self, value) -> None:
+        self.reserve_power = bool(value)
+
+    def reset_scene(self) -> None:
+        """END SCENE: Reserve Power returns; per-scene counters and talents reset."""
+        self.reserve_power = True
+        self.regain_power_attempts = 0
+        self.regain_power_penalty = 0
+        self.secondary_reactors_used = False
+        self.giving_it_all_used = False
+
     def normalize(self) -> None:
         """Keep derived limits consistent after talents / Scale change."""
+        self.regain_power_attempts = clamp(self.regain_power_attempts, 0, 20)
+        self.regain_power_penalty = clamp(self.regain_power_penalty, 0, 20)
         for sysname in SYSTEMS:
             if not self.breaches.get(sysname, 0):
                 self.breach_conditions[sysname] = ""
@@ -1016,6 +1045,7 @@ class Ship:
         self.devastating_systems = []
         self.complications = []
         self.reserve_power = True
+        self.regain_power_attempts = 0
         self.weapons_armed = True
 
     def active_effects(self) -> list:
@@ -1031,6 +1061,9 @@ class Ship:
             fx.append("Brace for Impact (no Major Action next turn)")
         if self.regain_power_penalty:
             fx.append(f"Losing Power (+{self.regain_power_penalty} to Regain Power)")
+        if self.regain_power_attempts:
+            fx.append(f"Regain Power tried {self.regain_power_attempts}x this scene "
+                      f"(+{self.regain_power_attempts})")
         if self.resistance_bonus:
             fx.append(f"Modulated Shields (+{self.resistance_bonus} Resistance)")
         if self.evasive:
@@ -1086,6 +1119,8 @@ class Ship:
             data["base_shields"] = data["shields_max"]
         if "base_resistance" not in data and "resistance" in data:
             data["base_resistance"] = data["resistance"]
+        if "reserve_power" not in data and "has_reserve_power" in data:
+            data["reserve_power"] = data["has_reserve_power"]
         ship = cls(name=str(data["name"]).strip())
         for f in fields(cls):
             if f.name in ("name", "weapons", "breach_conditions") or f.name not in data:
@@ -1527,6 +1562,9 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
             parts.append(("Own Evasive Action", 1))
         if action_name == "Regenerate Shields" and ship.shields <= 0:
             parts.append(("Shields at 0", 1))
+        if action_name == "Regain Power" and ship.regain_power_attempts:
+            parts.append((f"Earlier attempts this scene ({ship.regain_power_attempts})",
+                          ship.regain_power_attempts))
         if action_name == "Regain Power" and ship.regain_power_penalty:
             parts.append(("Losing Power!", ship.regain_power_penalty))
         if ship.jammed and adef["system"] in ("Communications", "Sensors"):
@@ -1537,6 +1575,9 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
             condition = ship.breach_condition(sysname)
             if BREACH_DIFFICULTY.get(condition):
                 parts.append((f"{condition} breach: {sysname}", BREACH_DIFFICULTY[condition]))
+        if (action_name == "Regain Power" and ship.has_talent("Improved Power Systems")
+                and sum(v for _label, v in parts) > 1):
+            parts.append(("Improved Power Systems", -1))
     if override:
         parts.append(("Override from another console", 1))
     if target is not None and target is not ship:
@@ -2782,6 +2823,7 @@ class CombatHelperApp:
         style.map("TNotebook.Tab", foreground=[("selected", purple)])
         for name, color, active in (("Accent", "#1f5fbf", "#2f74db"),
                                     ("EndRound", "#c76b00", "#e07f10"),
+                                    ("EndScene", "#5b2c83", "#7440a3"),
                                     ("Damage", "#b03a2e", "#cf4b3d")):
             style.configure(f"{name}.TButton", font=self.font_bold, foreground="#ffffff",
                             background=color)
@@ -2862,7 +2904,8 @@ class CombatHelperApp:
         menubar.add_cascade(label="File", menu=fm)
         cm = tk.Menu(menubar, tearoff=False)
         cm.add_command(label="End Round", command=self.end_round)
-        cm.add_command(label="New Scene (reset once-per-scene talents)", command=self.new_scene)
+        cm.add_command(label="End Scene / Reset Scene (Reserve Power, per-scene talents)",
+                       command=self.new_scene)
         cm.add_command(label="New Adventure (refill Crew Support)", command=self.new_adventure)
         menubar.add_cascade(label="Combat", menu=cm)
         vm = tk.Menu(menubar, tearoff=False)
@@ -2938,6 +2981,8 @@ class CombatHelperApp:
         self.round_lbl.pack(side="left", padx=4)
         ttk.Button(rf, text="END ROUND", style="EndRound.TButton", command=self.end_round).pack(
             side="left", padx=4, pady=4)
+        ttk.Button(rf, text="END SCENE", style="EndScene.TButton", command=self.new_scene).pack(
+            side="left", padx=(0, 4), pady=4)
 
         gf = ttk.LabelFrame(top, text="GM Modifier [ + / - ]", padding=(6, 0))
         gf.pack(side="left", padx=(0, 8))
@@ -3018,6 +3063,16 @@ class CombatHelperApp:
         self.turns_info_lbl.grid(row=5, column=0, sticky="w", pady=(2, 0))
         ctl = ttk.Frame(af)
         ctl.grid(row=6, column=0, sticky="ew", pady=(4, 0))
+        self.reserve_row = ttk.Frame(af)
+        self.reserve_row.grid(row=7, column=0, sticky="ew", pady=(2, 0))
+        self.reserve_info_lbl = ttk.Label(self.reserve_row, text="", style="Alert.TLabel",
+                                          wraplength=370, justify="left")
+        self.reserve_info_lbl.pack(side="top", anchor="w")
+        self.giving_btn = ttk.Button(self.reserve_row,
+                                     text=f"{GIVING_IT_ALL} (+{GIVING_IT_ALL_COST} Threat)",
+                                     style="Small.TButton",
+                                     command=lambda: self.use_giving_it_all())
+        self.giving_btn.pack(side="top", anchor="w", pady=(2, 0))
         self.atk_reserve_cb = ttk.Checkbutton(ctl, text="Reserve Power",
                                               variable=self.atk_reserve_var,
                                               command=self.toggle_attacker_reserve)
@@ -3027,7 +3082,7 @@ class CombatHelperApp:
         self.cloak_lbl = ttk.Label(ctl, text="", style="Alert.TLabel")
         self.cloak_lbl.pack(side="left", padx=6)
         pools = ttk.Frame(af)
-        pools.grid(row=7, column=0, sticky="w", pady=(3, 0))
+        pools.grid(row=8, column=0, sticky="w", pady=(3, 0))
         self.crew_support_lbl = ttk.Label(pools, text="Crew Support: -")
         self.crew_support_lbl.grid(row=0, column=0, sticky="w")
         ttk.Button(pools, text="-", width=3, style="Small.TButton",
@@ -3049,9 +3104,9 @@ class CombatHelperApp:
         self.details_btn = ttk.Button(af, text="Show ship details \u25b8",
                                       style="Small.TButton",
                                       command=self.toggle_attacker_details)
-        self.details_btn.grid(row=8, column=0, sticky="w", pady=(4, 0))
+        self.details_btn.grid(row=9, column=0, sticky="w", pady=(4, 0))
         self.active_status_lbl = ttk.Label(af, text="", justify="left", wraplength=370)
-        self.active_status_lbl.grid(row=9, column=0, sticky="w", pady=(3, 0))
+        self.active_status_lbl.grid(row=10, column=0, sticky="w", pady=(3, 0))
         self.active_status_lbl.grid_remove()
 
         tf = ttk.LabelFrame(body, text="Target Quick Status", padding=6)
@@ -3164,6 +3219,11 @@ class CombatHelperApp:
                                       command=self.failing_to_offline_acting)
         self.failing_btn.grid(row=4, column=0, columnspan=3, sticky="w", pady=(3, 0))
         self.failing_btn.grid_remove()
+        self.giving_step2_btn = ttk.Button(
+            sf, text=f"{GIVING_IT_ALL} (+{GIVING_IT_ALL_COST} Threat \u2192 Reserve Power)",
+            command=lambda: self.use_giving_it_all())
+        self.giving_step2_btn.grid(row=5, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self.giving_step2_btn.grid_remove()
 
         of = ttk.LabelFrame(body, text="Action Parameters", padding=6)
         of.grid(row=2, column=0, sticky="ew", pady=(0, 6))
@@ -3981,6 +4041,7 @@ class CombatHelperApp:
             self.active_res_lbl.configure(text="")
             self.atk_reserve_var.set(False)
             set_enabled(self.atk_reserve_cb, False)
+            self.reserve_row.grid_remove()
             set_enabled(self.cloak_btn, False)
             self.cloak_lbl.configure(text="")
             self.turns_lbl.configure(text="Turns used: - / -")
@@ -3996,6 +4057,7 @@ class CombatHelperApp:
         self.active_status_lbl.configure(text=self._ship_status_text(s))
         set_enabled(self.atk_reserve_cb, True)
         self.atk_reserve_var.set(s.reserve_power)
+        self._refresh_reserve_row(s)
         has_cloak = s.has_talent("Cloaking Device")
         set_enabled(self.cloak_btn, has_cloak)
         self.cloak_btn.configure(text="Decloak (Minor)" if s.cloaked else "Engage Cloak")
@@ -4050,6 +4112,15 @@ class CombatHelperApp:
         set_enabled(self.override_cb, adef["roll"] or self.override_var.get())
         set_enabled(self.other_base_sb, bool(adef.get("custom_base")))
         warnings = [w for w, level in self._breach_warnings(ship, name, adef) if level == "warn"]
+        power_blocked = bool(adef["requires_power"] and ship is not None
+                             and not ship.reserve_power)
+        if power_blocked:
+            warnings.insert(0, f"{NO_RESERVE_WARNING}\n{name} is blocked until Regain Power "
+                               "(Operations / Engineering) or END SCENE restores it.")
+        if power_blocked and self.giving_it_all_available(ship):
+            self.giving_step2_btn.grid()
+        else:
+            self.giving_step2_btn.grid_remove()
         if warnings:
             self.breach_warn_lbl.configure(text="\n".join(warnings))
             self.breach_warn_lbl.grid()
@@ -4084,7 +4155,8 @@ class CombatHelperApp:
             "tsol": is_fire and (tsol or fts),
             "scan": name == "Scan for Weakness",
             "regen": name == "Regenerate Shields",
-            "secreact": ship is not None and ship.has_talent("Secondary Reactors"),
+            "secreact": (name == "Reroute Power" and ship is not None
+                         and ship.has_talent("Secondary Reactors")),
             "override": bool(adef["roll"] or self.override_var.get()),
             "other": bool(adef.get("custom_base")),
         })
@@ -4108,6 +4180,10 @@ class CombatHelperApp:
         else:
             self.resolve_btn.configure(text="RESOLVE (MANUAL SUCCESSES)" if manual
                                        else "ROLL & RESOLVE")
+        hard_block = power_blocked and not self.giving_it_all_available(ship)
+        set_enabled(self.resolve_btn, not hard_block)
+        if hard_block:
+            self.resolve_btn.configure(text="BLOCKED - NO RESERVE POWER")
 
         total, parts = self.compute_current_difficulty()
         if defense and total is not None:
@@ -4293,7 +4369,9 @@ class CombatHelperApp:
                 if ship.brace_for_impact and name != "Pass":
                     alerts.append("Brace for Impact: this ship cannot take a Major Action now.")
             if adef["requires_power"] and not ship.reserve_power:
-                alerts.append("Requires Reserve Power - the ship has none (Regain Power first).")
+                alerts.append(f"{NO_RESERVE_WARNING} - blocked until Regain Power, END SCENE"
+                              + (f" or {GIVING_IT_ALL}" if self.giving_it_all_available(ship)
+                                 else "") + " restores it.")
             if name == "Warp" and not ship.warp_prepared:
                 alerts.append("Warp requires a prior Prepare (Warp) minor action.")
             if name == "Fire" and not ship.weapons_armed:
@@ -4545,6 +4623,30 @@ class CombatHelperApp:
             elif t in EXPERIMENTAL_RULES:
                 text = (f"Ship assist dice complicate on {ship.assist_complication_from}-20.")
                 tag = "warn" if acting and (self.current_action() or {}).get("assist") else ""
+            elif t == GIVING_IT_ALL:
+                if ship.giving_it_all_used:
+                    text = "Used this scene (END SCENE resets it)."
+                elif ship.reserve_power:
+                    text = ("Once per scene, when Reserve Power is expended: add 2 Threat to "
+                            "regain it.")
+                else:
+                    text = "AVAILABLE NOW: add 2 Threat to regain Reserve Power (button)."
+                    tag = "good"
+            elif t == "Improved Power Systems":
+                text = "Regain Power is 1 Difficulty lower (minimum 1) - included."
+                if acting and name == "Regain Power":
+                    tag = "good"
+            elif t == "Secondary Reactors":
+                if ship.secondary_reactors_used:
+                    text = "Used this scene (END SCENE resets it)."
+                else:
+                    text = ("During Reroute Power: spend 2 Momentum to restore Reserve Power "
+                            "(once per scene).")
+                    if acting and name == "Reroute Power":
+                        tag = "good"
+            elif t == "Backup EPS Conduits":
+                text = (f"'Losing Power!': roll 1d20 <= Structure "
+                        f"({ship.systems.get('Structure', 0)}) to keep Reserve Power (prompted).")
             elif t == "Abundant Personnel":
                 text = (f"Crew Support doubled: {ship.crew_support_max} "
                         f"({ship.crew_support_used} used).")
@@ -4771,6 +4873,11 @@ class CombatHelperApp:
         if adef["requires_power"] and ship.reserve_power:
             ship.reserve_power = False
             self.log(f"{ship.name} consumes its Reserve Power.")
+        if name == "Regain Power":
+            ship.regain_power_attempts += 1
+            ship.regain_power_penalty = 0       # 'Losing Power!' applied to this attempt
+            self.log(f"{ship.name}: Regain Power attempt {ship.regain_power_attempts} this scene "
+                     f"- the next one is +{ship.regain_power_attempts} Difficulty.")
         if reaction:
             if adef["system"] and adef["system"] not in ship.systems_used:
                 ship.systems_used.append(adef["system"])
@@ -4826,9 +4933,8 @@ class CombatHelperApp:
                 else:
                     self.log(f"WARNING: {ship.name} re-uses {sysname} without spending Threat "
                              "(GM override).", "alert")
-        if adef["requires_power"] and not ship.reserve_power and not self.ask_yes_no(
-                "No Reserve Power", f"{name} requires Reserve Power and {ship.name} has none."
-                                    "\n\nProceed anyway?"):
+        if adef["requires_power"] and not ship.reserve_power \
+                and not self._offer_reserve_power(ship, name):
             return None
         if name == "Warp" and not ship.warp_prepared and not self.ask_yes_no(
                 "Not prepared", f"{ship.name} has not used Prepare (Warp).\n\nProceed anyway?"):
@@ -5202,6 +5308,51 @@ class CombatHelperApp:
                                    f"{ship.name}'s Reserve Power now? (once per scene)"):
                     self.use_secondary_reactors(ship)
 
+    def giving_it_all_available(self, ship) -> bool:
+        return (ship is not None and ship.has_talent(GIVING_IT_ALL)
+                and not ship.giving_it_all_used and not ship.reserve_power)
+
+    def use_giving_it_all(self, ship=None) -> bool:
+        """I'm Giving It All She's Got!: once per scene, add 2 Threat to regain Reserve Power
+        (an NPC ship spends 2 Threat instead)."""
+        ship = ship or self.attacker
+        if ship is None or not ship.has_talent(GIVING_IT_ALL):
+            return False
+        if ship.giving_it_all_used:
+            self.show_info(GIVING_IT_ALL, f"{ship.name} already used it this scene.")
+            return False
+        if ship.reserve_power:
+            self.show_info(GIVING_IT_ALL, f"{ship.name} still has its Reserve Power.")
+            return False
+        if ship.side == "Player":
+            self.add_threat(GIVING_IT_ALL_COST, f"{ship.name}: {GIVING_IT_ALL}")
+        elif not self.pay_for_side(ship, GIVING_IT_ALL_COST, GIVING_IT_ALL):
+            return False
+        ship.reserve_power = True
+        ship.giving_it_all_used = True
+        self.log(f"{ship.name}: {GIVING_IT_ALL} - Reserve Power restored (used for this scene).",
+                 "success")
+        self.changed()
+        return True
+
+    def _offer_reserve_power(self, ship, name) -> bool:
+        """`name` needs Reserve Power that `ship` has expended: offer the talent that can bring
+        it back, otherwise block the action. True = the ship has Reserve Power again."""
+        if self.giving_it_all_available(ship):
+            cost = ("adds" if ship.side == "Player" else "spends") + f" {GIVING_IT_ALL_COST} Threat"
+            if self.ask_yes_no(GIVING_IT_ALL,
+                               f"{name} requires Reserve Power, but {ship.name}'s is expended."
+                               f"\n\nUse {GIVING_IT_ALL} now ({cost}, once per scene) to "
+                               "regain it?"):
+                return self.use_giving_it_all(ship)
+        self.show_error("Requires Reserve Power",
+                        f"{NO_RESERVE_WARNING}\n\n{name} needs Reserve Power and {ship.name} "
+                        "has expended it this scene.\n\nRestore it with Regain Power "
+                        "(Operations / Engineering) or END SCENE.\n(GM override: tick Reserve "
+                        "Power in the Active Attacker card.)")
+        self.log(f"{ship.name}: {name} blocked - no Reserve Power.", "alert")
+        return False
+
     def use_secondary_reactors(self, ship=None):
         ship = ship or self.attacker
         if ship is None or not ship.has_talent("Secondary Reactors"):
@@ -5223,10 +5374,18 @@ class CombatHelperApp:
         self.changed()
 
     def new_scene(self):
+        """END SCENE / RESET SCENE (End Round never restores Reserve Power)."""
+        if not self.ask_yes_no(
+                "End Scene", "End the scene?\n\n- Reserve Power is restored for every ship\n"
+                             "- Regain Power attempts reset (next attempt: Difficulty 1)\n"
+                             "- once-per-scene talents can be used again\n\nDamage, breaches "
+                             "and the round counter are not changed."):
+            return
         for ship in self.ships:
-            ship.secondary_reactors_used = False
-        self.log("--- NEW SCENE --- once-per-scene talents (Secondary Reactors) are available "
-                 "again.", "separator")
+            ship.reset_scene()
+        self.log("--- END OF SCENE --- Reserve Power restored for all ships; Regain Power "
+                 "attempts and once-per-scene talents (Secondary Reactors, "
+                 f"{GIVING_IT_ALL}) reset.", "separator")
         if self.scene_traits and self.ask_yes_no(
                 "New Scene", f"Clear the {len(self.scene_traits)} scene trait(s) as well?"):
             self.scene_traits = []
@@ -5240,7 +5399,7 @@ class CombatHelperApp:
         for ship in self.ships:
             ship.crew_support_used = 0
             ship.small_craft_deployed = 0
-            ship.secondary_reactors_used = False
+            ship.reset_scene()                 # a new adventure starts a new scene
         self.log("--- NEW ADVENTURE --- Crew Support refilled, small craft recovered.",
                  "separator")
         self.changed()
@@ -5765,11 +5924,11 @@ class CombatHelperApp:
         if name == "Brace for Impact!":
             ship.brace_for_impact = True
         elif name == "Losing Power!":
-            ship.reserve_power = False
-            ship.regain_power_penalty = 1
-            if ship.has_talent("Backup EPS Conduits"):
-                self.log(f"Reminder: {ship.name} has Backup EPS Conduits - check whether the "
-                         "talent mitigates this power loss (GM ruling).", "alert")
+            if self._backup_eps_keeps_power(ship):
+                how += " (negated by Backup EPS Conduits - Reserve Power kept)"
+            else:
+                ship.reserve_power = False
+                ship.regain_power_penalty += 1
         elif name == "Casualties and Minor Damage":
             text = self.ask_string("Complication", f"Complication trait for {ship.name}:",
                                    "Casualties and Minor Damage")
@@ -5778,6 +5937,23 @@ class CombatHelperApp:
         self.log(f"Minor Damage on {ship.name}{how}: {name} - "
                  f"{minor_damage_description(name)}", "alert")
         self.changed()
+
+    def _backup_eps_keeps_power(self, ship) -> bool:
+        """Backup EPS Conduits: roll 1d20 <= Structure to keep the Reserve Power."""
+        if not (ship.reserve_power and ship.has_talent("Backup EPS Conduits")):
+            return False
+        structure = ship.systems.get("Structure", 0)
+        if not self.ask_yes_no("Backup EPS Conduits",
+                               f"{ship.name} is Losing Power!\n\nBackup EPS Conduits: roll 1d20 - "
+                               f"on {structure} (Structure) or less the ship keeps its Reserve "
+                               "Power.\n\nRoll now?"):
+            return False
+        roll = self.rng.randint(1, 20)
+        kept = roll <= structure
+        self.log(f"Backup EPS Conduits: {ship.name} rolls {roll} vs Structure {structure} - "
+                 + ("Reserve Power KEPT." if kept else "failed, the power is lost."),
+                 "success" if kept else "alert")
+        return kept
 
     def shaken_resolver_clicked(self):
         t = self.target
@@ -5875,6 +6051,40 @@ class CombatHelperApp:
         ship.disengage_cloak()
         self.log(f"{ship.name} decloaks (Minor Action){reason}. Shields remain DOWN - use "
                  "Tactical > Prepare to raise them.", "alert")
+
+    def regain_power_difficulty(self, ship) -> int:
+        """Difficulty of the ship's next Regain Power attempt (before the GM Modifier)."""
+        adef = BRIDGE_STATIONS["Operations / Engineering"]["Regain Power"]
+        return compute_difficulty("Regain Power", adef, ship)[0]
+
+    def _refresh_reserve_row(self, s):
+        """Active Attacker card: Reserve Power state, next Regain Power Difficulty, talent."""
+        if not s.reserve_power:
+            text = (f"Reserve Power EXPENDED - Regain Power next at Difficulty "
+                    f"{self.regain_power_difficulty(s)} (attempt {s.regain_power_attempts + 1} "
+                    "this scene); END SCENE restores it.")
+            style = "Alert.TLabel"
+        elif s.regain_power_attempts:
+            text = (f"Regain Power tried {s.regain_power_attempts}x this scene (next at "
+                    f"Difficulty {self.regain_power_difficulty(s)}).")
+            style = "Info.TLabel"
+        else:
+            text, style = "", "Info.TLabel"
+        self.reserve_info_lbl.configure(text=text, style=style)
+        has_talent = s.has_talent(GIVING_IT_ALL)
+        if text:
+            self.reserve_info_lbl.pack(side="top", anchor="w")
+        else:
+            self.reserve_info_lbl.pack_forget()
+        if has_talent:
+            self.giving_btn.pack(side="top", anchor="w", pady=(2, 0))
+            set_enabled(self.giving_btn, self.giving_it_all_available(s))
+        else:
+            self.giving_btn.pack_forget()
+        if text or has_talent:
+            self.reserve_row.grid()
+        else:
+            self.reserve_row.grid_remove()
 
     def toggle_attacker_reserve(self):
         s = self.attacker
@@ -6373,6 +6583,12 @@ class CombatHelperApp:
         txt.insert("end", "\nBreach triggers\n", "h")
         txt.insert("end", "  Shields reduced to 0; any damaging hit while Shields are 0; "
                           "< 25% when already Shaken in the same attack. High Yield adds +1.\n")
+        txt.insert("end", "\nReserve Power (once per scene)\n", "h")
+        txt.insert("end", "  Needed and used up by Warp, Regenerate Shields, Reroute Power (and "
+                          "Cloak); without it these actions are blocked. Regain Power: Control + "
+                          "Engineering, Difficulty 1 +1 per earlier attempt this scene (+1 after "
+                          "Losing Power!). Drained by Losing Power! and Dampening hits. END ROUND "
+                          "keeps it spent; END SCENE restores it for every ship.\n")
         txt.insert("end", "\nWeapon Qualities\n", "h")
         for q, (has_x, desc) in WEAPON_QUALITIES.items():
             txt.insert("end", f"  {q}{' X' if has_x else ''}: {desc}\n")

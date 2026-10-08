@@ -744,5 +744,94 @@ class WeaponCalculatorTests(unittest.TestCase):
         self.assertEqual(resolve_area_or_spread(w, None).qualities, w.qualities)
 
 
+class ReservePowerTests(unittest.TestCase):
+    """Reserve Power is a once-per-scene resource; Regain Power gets harder per attempt."""
+
+    def setUp(self):
+        self.ship = preset_ships()[0]
+        self.regain = action("Operations / Engineering", "Regain Power")
+
+    def diff(self):
+        return compute_difficulty("Regain Power", self.regain, self.ship)[0]
+
+    def test_alias_and_default(self):
+        self.assertTrue(self.ship.has_reserve_power)
+        self.ship.has_reserve_power = False
+        self.assertFalse(self.ship.reserve_power)
+        d = self.ship.to_dict()
+        d.pop("reserve_power")
+        d["has_reserve_power"] = "true"
+        self.assertTrue(Ship.from_dict(d).reserve_power)
+
+    def test_power_actions(self):
+        for station, name in (("Conn / Helm", "Warp"),
+                              ("Operations / Engineering", "Regenerate Shields"),
+                              ("Operations / Engineering", "Reroute Power")):
+            self.assertTrue(action(station, name)["requires_power"], name)
+        self.assertFalse(self.regain["requires_power"])
+
+    def test_end_round_keeps_it_spent(self):
+        self.ship.reserve_power = False
+        self.ship.regain_power_attempts = 2
+        self.ship.reset_round()
+        self.assertFalse(self.ship.reserve_power)
+        self.assertEqual(self.ship.regain_power_attempts, 2)
+
+    def test_end_scene_restores(self):
+        s = self.ship
+        s.reserve_power, s.regain_power_attempts, s.regain_power_penalty = False, 3, 1
+        s.secondary_reactors_used = s.giving_it_all_used = True
+        s.reset_scene()
+        self.assertTrue(s.reserve_power)
+        self.assertEqual((s.regain_power_attempts, s.regain_power_penalty), (0, 0))
+        self.assertFalse(s.secondary_reactors_used or s.giving_it_all_used)
+        self.assertEqual(self.diff(), 1)
+
+    def test_regain_difficulty_per_attempt(self):
+        for attempts, expected in ((0, 1), (1, 2), (2, 3), (4, 5)):
+            self.ship.regain_power_attempts = attempts
+            self.assertEqual(self.diff(), expected, attempts)
+
+    def test_losing_power_penalty(self):
+        self.ship.regain_power_attempts = 1
+        self.ship.regain_power_penalty = 1
+        total, parts = compute_difficulty("Regain Power", self.regain, self.ship)
+        self.assertEqual(total, 3)
+        self.assertIn(("Losing Power!", 1), parts)
+
+    def test_improved_power_systems(self):
+        self.ship.talents.append("Improved Power Systems")
+        self.assertEqual(self.diff(), 1)                       # minimum 1
+        self.ship.regain_power_attempts = 2
+        total, parts = compute_difficulty("Regain Power", self.regain, self.ship)
+        self.assertEqual(total, 2)
+        self.assertIn(("Improved Power Systems", -1), parts)
+
+    def test_new_talents_in_catalogue(self):
+        for name in (main.GIVING_IT_ALL, "Improved Power Systems", "Backup EPS Conduits",
+                     "Secondary Reactors"):
+            self.assertIn(name, main.STARSHIP_TALENTS)
+
+    def test_state_persists_and_is_sanitised(self):
+        s = self.ship
+        s.reserve_power, s.regain_power_attempts, s.giving_it_all_used = False, 2, True
+        clone = Ship.from_dict(s.to_dict())
+        self.assertEqual((clone.reserve_power, clone.regain_power_attempts,
+                          clone.giving_it_all_used), (False, 2, True))
+        d = s.to_dict()
+        d["regain_power_attempts"] = -5
+        d["regain_power_penalty"] = 999
+        clone = Ship.from_dict(d)
+        clone.normalize()
+        self.assertEqual((clone.regain_power_attempts, clone.regain_power_penalty), (0, 20))
+
+    def test_full_repair_resets_power(self):
+        self.ship.reserve_power = False
+        self.ship.regain_power_attempts = 3
+        self.ship.full_repair()
+        self.assertTrue(self.ship.reserve_power)
+        self.assertEqual(self.ship.regain_power_attempts, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

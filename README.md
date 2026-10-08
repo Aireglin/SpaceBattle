@@ -61,9 +61,9 @@ the game flow. Switch tabs with a click, the **View** menu or `Ctrl+1` / `Ctrl+2
 `Ctrl+3`.
 
 **Header (all tabs):** Threat and Momentum counters with − / + (Momentum is capped at
-6), the Round counter with **END ROUND**, the GM Modifier spinbox (−3…+5) and the
-roster file name, which flags unsaved changes. The **Combat** menu has End Round,
-*New Scene* and *New Adventure*.
+6), the Round counter with **END ROUND** and **END SCENE**, the GM Modifier spinbox
+(−3…+5) and the roster file name, which flags unsaved changes. The **Combat** menu
+has End Round, *End Scene / Reset Scene* and *New Adventure*.
 
 ### Tab 1 – Combat Dashboard (the GM's view during turns)
 
@@ -211,9 +211,12 @@ section. It fills in the standard stats from the Core Rulebook weapon tables
 | **Experimental Vessel / Prototype** | The ship's assist dice cause a complication on 18–20 |
 | **Abundant Personnel** | Doubles the Crew Support pool (Scale × 2). Comes with a used / available tracker |
 | **Point Defense System** | While active (a toggle in Target Quick Status), torpedo attacks against the ship are +1 Difficulty (Cover) |
-| **Secondary Reactors** | After a Reroute Power action, a prompt offers **2 Momentum (Immediate) to restore Reserve Power**, once per scene. There's also a context button in Action Options. *Combat → New Scene* resets it |
+| **Secondary Reactors** | During **Reroute Power** (once per scene): a prompt after the action, and a button in Action Parameters, spend **2 Momentum (Immediate) to restore Reserve Power**. END SCENE resets it |
 | **Rugged Design** | Damage Control re-rolls a failed d20. On success you're offered a second breach patch for 2 Momentum |
-| **Backup EPS Conduits, Improved Damage Control** | Reminders that pop up during Reroute Power, power loss (*Losing Power!*) and Damage Control |
+| **Backup EPS Conduits** | When *Losing Power!* (Shaken) would drain the Reserve Power, the app offers a **1d20 roll: on Structure or less the ship keeps its Reserve Power** (and the Regain Power penalty doesn't apply) |
+| **I'm Giving It All She's Got!** | Once per scene, while the ship has no Reserve Power: **add 2 Threat** (an NPC ship spends 2 Threat) to regain it. There's a button in the Active Attacker card and under the warning box, and the app offers it when you try a power action |
+| **Improved Power Systems** | Regain Power is **1 Difficulty lower** (never below 1) |
+| **Improved Damage Control** | Reminder during Damage Control |
 | **Electronic Warfare Systems, Reduced Sensor Silhouette, Emergency Medical Hologram, Specialized Shuttlebay** | Reminder text in the alerts panel |
 
 The **Active Quality & Talent Alerts** panel lists the attacker's and target's talents
@@ -299,7 +302,24 @@ the dropdown; *Skip* leaves the system's condition unchanged.
 * **End Round:** advances the Round counter by 1. It applies Persistent damage and
   resets turn counters and the per-round effects: Modulate Shields +2 Resistance,
   Evasive Action, Defensive Fire, Attack Pattern, Jammed, Slowed, Shaken, and a
-  cloaked ship's Revealed status. Then it logs `--- END OF ROUND X ---`.
+  cloaked ship's Revealed status. Then it logs `--- END OF ROUND X ---`. It never
+  restores Reserve Power.
+* **Reserve Power** is a once-per-scene resource (`reserve_power`, also available as
+  `has_reserve_power`; every ship starts the scene with it):
+  * **Warp**, **Regenerate Shields** and **Reroute Power** (and **Cloak**) need it and
+    use it up as soon as the action is resolved, whether or not the task succeeds.
+  * Without it, Step 2 shows **⚠ Requires Reserve Power! (Currently Expended)**,
+    ROLL & RESOLVE is blocked and no shields are restored. To override as GM, tick
+    *Reserve Power* in the Active Attacker card.
+  * **Regain Power** (Control + Engineering) starts at **Difficulty 1** and gets
+    **+1 for every earlier attempt this scene**, successful or not. *Losing Power!*
+    adds +1 more to the next attempt, which uses the penalty up. Success restores
+    Reserve Power. The Active Attacker card shows the next attempt's Difficulty.
+  * **Losing Power!** (Shaken) and a hit by a **Dampening** weapon drain it.
+  * **END SCENE** (header button, or *Combat → End Scene / Reset Scene*) asks for
+    confirmation. It then restores Reserve Power for every ship and resets the Regain
+    Power attempts, the Losing Power penalty and the once-per-scene talents. Damage,
+    breaches and the round counter stay as they are. *New Adventure* does the same.
 * **Crew Quality** sets the NPC crew's Attribute / Department: Basic 8/1,
   Proficient 9/2, Talented 10/3, Exceptional 11/4.
 * **Difficulty** = Base + Weapon modifiers (Cumbersome +1) + context + GM Modifier.
@@ -310,7 +330,8 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   * Point Defense (+1 vs torpedoes)
   * a Cloaked target (+1)
   * Shields at 0 for Regenerate Shields
-  * Losing Power for Regain Power
+  * earlier attempts this scene and Losing Power for Regain Power (−1 with Improved
+    Power Systems, minimum 1)
   * Jammed for Comms / Sensors tasks
   * Devastating breaches for Damage Control
 * **Opposed tasks** (the target used Evasive Action or Defensive Fire). The Rule Hint Card
@@ -373,7 +394,8 @@ defines a mechanic, the app follows the spec. The calls below are easy to change
   Rugged Design's re-roll plus second patch.
 * **Unconfirmed online:** the exact 2e text for Backup EPS Conduits, Improved Damage
   Control, Electronic Warfare Systems, Reduced Sensor Silhouette, Emergency Medical
-  Hologram and Specialized Shuttlebay. These are reminders, not automation.
+  Hologram and Specialized Shuttlebay. These are reminders, not automation. Backup EPS
+  Conduits, I'm Giving It All She's Got! and Improved Power Systems follow your spec.
 * **Reveal** lasts until End Round. **Crew Support** and small craft refill with
   *Combat → New Adventure*.
 * **Bonus damage** costs 2 Momentum per +1. **Devastating Attack** costs 2 Momentum
