@@ -211,7 +211,7 @@ section. It fills in the standard stats from the Core Rulebook weapon tables
 | **Experimental Vessel / Prototype** | The ship's assist dice cause a complication on 18–20 |
 | **Abundant Personnel** | Doubles the Crew Support pool (Scale × 2). Comes with a used / available tracker |
 | **Point Defense System** | While active (a toggle in Target Quick Status), torpedo attacks against the ship are +1 Difficulty (Cover) |
-| **Secondary Reactors** | During **Reroute Power** (once per scene): a prompt after the action, and a button in Action Parameters, spend **2 Momentum (Immediate) to restore Reserve Power**. END SCENE resets it |
+| **Secondary Reactors** | During **Reroute Power** (once per scene): a prompt after the action offers to spend **2 Momentum (Immediate) to restore Reserve Power**. If you decline, the button in Action Parameters works until the ship's next action or End Round, and only after a Reroute Power was actually executed. END SCENE resets it |
 | **Rugged Design** | Damage Control re-rolls a failed d20. On success you're offered a second breach patch for 2 Momentum |
 | **Backup EPS Conduits** | When *Losing Power!* (Shaken) would drain the Reserve Power, the app offers a **1d20 roll: on Structure or less the ship keeps its Reserve Power** (and the Regain Power penalty doesn't apply) |
 | **I'm Giving It All She's Got!** | Once per scene, while the ship has no Reserve Power: **add 2 Threat** (an NPC ship spends 2 Threat) to regain it. There's a button in the Active Attacker card and under the warning box, and the app offers it when you try a power action |
@@ -308,6 +308,7 @@ the dropdown; *Skip* leaves the system's condition unchanged.
   `has_reserve_power`; every ship starts the scene with it):
   * **Warp**, **Regenerate Shields** and **Reroute Power** (and **Cloak**) need it and
     use it up as soon as the action is resolved, whether or not the task succeeds.
+    Reroute Power asks for the target system first; cancelling it spends nothing.
   * Without it, Step 2 shows **⚠ Requires Reserve Power! (Currently Expended)**,
     ROLL & RESOLVE is blocked and no shields are restored. To override as GM, tick
     *Reserve Power* in the Active Attacker card.

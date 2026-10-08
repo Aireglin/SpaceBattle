@@ -840,6 +840,7 @@ class Ship:
     regain_power_penalty: int = 0     # 'Losing Power!': +1 each to the next Regain Power
     regain_power_attempts: int = 0    # Regain Power attempts this scene (+1 Difficulty each)
     giving_it_all_used: bool = False  # I'm Giving It All She's Got! (once per scene)
+    reroute_window: bool = False      # just executed Reroute Power (Secondary Reactors)
     # --- per-round state (reset by End Round) ------------------------------
     turns_used: int = 0
     systems_used: list = field(default_factory=list)
@@ -964,6 +965,7 @@ class Ship:
         self.regain_power_penalty = 0
         self.secondary_reactors_used = False
         self.giving_it_all_used = False
+        self.reroute_window = False
 
     def normalize(self) -> None:
         """Keep derived limits consistent after talents / Scale change."""
@@ -1019,6 +1021,7 @@ class Ship:
         self.slowed = False
         self.shaken = False
         self.revealed = False
+        self.reroute_window = False
 
     def clear_temporary_effects(self) -> None:
         self.reset_round()
@@ -1061,7 +1064,7 @@ class Ship:
             fx.append("Brace for Impact (no Major Action next turn)")
         if self.regain_power_penalty:
             fx.append(f"Losing Power (+{self.regain_power_penalty} to Regain Power)")
-        if self.regain_power_attempts:
+        if self.regain_power_attempts and not self.reserve_power:
             fx.append(f"Regain Power tried {self.regain_power_attempts}x this scene "
                       f"(+{self.regain_power_attempts})")
         if self.resistance_bonus:
@@ -1575,9 +1578,6 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
             condition = ship.breach_condition(sysname)
             if BREACH_DIFFICULTY.get(condition):
                 parts.append((f"{condition} breach: {sysname}", BREACH_DIFFICULTY[condition]))
-        if (action_name == "Regain Power" and ship.has_talent("Improved Power Systems")
-                and sum(v for _label, v in parts) > 1):
-            parts.append(("Improved Power Systems", -1))
     if override:
         parts.append(("Override from another console", 1))
     if target is not None and target is not ship:
@@ -1588,6 +1588,10 @@ def compute_difficulty(action_name: str, adef: dict, ship=None, weapon=None,
         if (action_name == "Fire" and weapon is not None and weapon.wtype == "Torpedo"
                 and target.has_talent("Point Defense System") and target.point_defense_active):
             parts.append(("Point Defense (Cover)", 1))
+    if (action_name == "Regain Power" and ship is not None
+            and ship.has_talent("Improved Power Systems")
+            and sum(v for _label, v in parts) + gm_modifier > 1):
+        parts.append(("Improved Power Systems", -1))     # never below Difficulty 1
     parts.append(("GM Modifier", gm_modifier))
     total = max(0, sum(v for _label, v in parts))
     return total, parts
@@ -2768,6 +2772,7 @@ class CombatHelperApp:
         self.pending_attack = None
         self.last_system_hit = None
         self.last_nature_text = ""
+        self._reroute_choice = None          # system picked for a Reroute Power in progress
         self._refreshing = False
         self._last_attacker = None
 
@@ -2828,6 +2833,8 @@ class CombatHelperApp:
             style.configure(f"{name}.TButton", font=self.font_bold, foreground="#ffffff",
                             background=color)
             style.map(f"{name}.TButton", background=[("disabled", "#9a9aa6"), ("active", active)])
+        for name in ("EndRound", "EndScene"):
+            style.configure(f"{name}.TButton", padding=(6, 3))
 
     # ------------------------------------------------------------------- vars
     def _init_vars(self):
@@ -2979,10 +2986,10 @@ class CombatHelperApp:
         rf.pack(side="left", padx=(0, 8))
         self.round_lbl = ttk.Label(rf, text="1", width=3, anchor="center", style="Round.TLabel")
         self.round_lbl.pack(side="left", padx=4)
-        ttk.Button(rf, text="END ROUND", style="EndRound.TButton", command=self.end_round).pack(
-            side="left", padx=4, pady=4)
-        ttk.Button(rf, text="END SCENE", style="EndScene.TButton", command=self.new_scene).pack(
-            side="left", padx=(0, 4), pady=4)
+        ttk.Button(rf, text="END ROUND", style="EndRound.TButton", width=-1,
+                   command=self.end_round).pack(side="left", padx=(4, 2), pady=4)
+        ttk.Button(rf, text="END SCENE", style="EndScene.TButton", width=-1,
+                   command=self.new_scene).pack(side="left", padx=(0, 4), pady=4)
 
         gf = ttk.LabelFrame(top, text="GM Modifier [ + / - ]", padding=(6, 0))
         gf.pack(side="left", padx=(0, 8))
@@ -4146,7 +4153,8 @@ class CombatHelperApp:
         set_enabled(self.scan_rb2, name == "Scan for Weakness")
         set_enabled(self.regen_cb, name == "Regenerate Shields")
         set_enabled(self.secreact_btn, ship is not None and ship.has_talent("Secondary Reactors")
-                    and not ship.secondary_reactors_used and not ship.reserve_power)
+                    and not ship.secondary_reactors_used and not ship.reserve_power
+                    and ship.reroute_window)
         self._show_param_rows({
             "weapon": is_fire,
             "salvo": is_fire and weapon is not None and weapon.wtype == "Torpedo",
@@ -4858,6 +4866,7 @@ class CombatHelperApp:
         reuse_threat = self._precheck_action(ship, name, adef, weapon, target, reaction)
         if reuse_threat is None:
             return
+        ship.reroute_window = False          # Secondary Reactors: only during Reroute Power
         difficulty, parts = self.compute_current_difficulty()
         if not self._pay_action_costs(ship, name, adef, weapon, reuse_threat):
             self.refresh_all()
@@ -4936,6 +4945,13 @@ class CombatHelperApp:
         if adef["requires_power"] and not ship.reserve_power \
                 and not self._offer_reserve_power(ship, name):
             return None
+        if name == "Reroute Power":
+            sysname = self.ask_choice("Reroute Power", f"Reroute {ship.name}'s Reserve Power to "
+                                                       "which system?", SYSTEMS, "Weapons")
+            if not sysname:
+                self.log(f"{ship.name}: Reroute Power cancelled - nothing spent.")
+                return None
+            self._reroute_choice = sysname
         if name == "Warp" and not ship.warp_prepared and not self.ask_yes_no(
                 "Not prepared", f"{ship.name} has not used Prepare (Warp).\n\nProceed anyway?"):
             return None
@@ -5292,14 +5308,14 @@ class CombatHelperApp:
             ship.regain_power_penalty = 0
             self.log(f"{ship.name} regains Reserve Power.", "success")
         elif name == "Reroute Power":
-            sysname = self.ask_choice("Reroute Power", f"Reroute {ship.name}'s Reserve Power to "
-                                                       "which system?", SYSTEMS, "Weapons")
+            sysname = self._reroute_choice or self.ask_choice(
+                "Reroute Power", f"Reroute {ship.name}'s Reserve Power to which system?",
+                SYSTEMS, "Weapons")
+            self._reroute_choice = None
             if sysname:
                 ship.rerouted_power = sysname
                 self.log(f"{ship.name} reroutes Reserve Power to {sysname}.", "success")
-            if ship.has_talent("Backup EPS Conduits"):
-                self.log(f"Reminder: {ship.name} has Backup EPS Conduits - apply the talent's "
-                         "benefit to this power reroute (GM ruling).", "alert")
+            ship.reroute_window = True
             if (ship.has_talent("Secondary Reactors") and not ship.secondary_reactors_used
                     and not ship.reserve_power):
                 payer = "Threat" if ship.side == "NPC" else "Momentum"
@@ -5365,6 +5381,10 @@ class CombatHelperApp:
         if ship.reserve_power:
             self.show_info("Secondary Reactors", f"{ship.name} already has Reserve Power.")
             return
+        if not ship.reroute_window:
+            self.show_info("Secondary Reactors", "Secondary Reactors can only be used during "
+                                                 f"{ship.name}'s Reroute Power action.")
+            return
         if not self.pay_for_side(ship, 2, "Secondary Reactors"):
             return
         ship.reserve_power = True
@@ -5394,13 +5414,17 @@ class CombatHelperApp:
 
     def new_adventure(self):
         if not self.ask_yes_no("New Adventure", "Refill every ship's Crew Support and recover "
-                                                "all deployed small craft?"):
+                                                "all deployed small craft?\n\nThis also starts a "
+                                                "new scene: Reserve Power is restored and the "
+                                                "Regain Power attempts and once-per-scene talents "
+                                                "reset."):
             return
         for ship in self.ships:
             ship.crew_support_used = 0
             ship.small_craft_deployed = 0
             ship.reset_scene()                 # a new adventure starts a new scene
-        self.log("--- NEW ADVENTURE --- Crew Support refilled, small craft recovered.",
+        self.log("--- NEW ADVENTURE --- Crew Support refilled, small craft recovered, Reserve "
+                 "Power restored and per-scene counters reset.",
                  "separator")
         self.changed()
 

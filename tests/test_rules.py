@@ -807,6 +807,21 @@ class ReservePowerTests(unittest.TestCase):
         self.assertEqual(total, 2)
         self.assertIn(("Improved Power Systems", -1), parts)
 
+    def test_improved_power_systems_counts_override_and_gm(self):
+        self.ship.talents.append("Improved Power Systems")
+        total, parts = compute_difficulty("Regain Power", self.regain, self.ship, override=True)
+        self.assertEqual(total, 1)
+        self.assertIn(("Improved Power Systems", -1), parts)
+        self.assertEqual(compute_difficulty("Regain Power", self.regain, self.ship,
+                                            gm_modifier=1)[0], 1)
+        self.assertEqual(compute_difficulty("Regain Power", self.regain, self.ship,
+                                            gm_modifier=-1)[0], 0)   # GM may go lower
+
+    def test_reroute_window_closes_at_end_round(self):
+        self.ship.reroute_window = True
+        self.ship.reset_round()
+        self.assertFalse(self.ship.reroute_window)
+
     def test_new_talents_in_catalogue(self):
         for name in (main.GIVING_IT_ALL, "Improved Power Systems", "Backup EPS Conduits",
                      "Secondary Reactors"):
